@@ -191,7 +191,7 @@ class AnalysisLoop:
     # -- one iteration --------------------------------------------
 
     def _iterate(self) -> None:
-        t0 = time.perf_counter()
+        t0 = time.monotonic()
 
         frame = self._mailbox.get()
         stats = self._mailbox.stats()
@@ -213,7 +213,7 @@ class AnalysisLoop:
             (emitted_ts - capture_ts) * 1000.0 if capture_ts is not None else None
         )
 
-        iter_latency_ms = (time.perf_counter() - t0) * 1000.0
+        iter_latency_ms = (time.monotonic() - t0) * 1000.0
         self._last_iter_ms = iter_latency_ms
         self.metrics.samples("iter_latency_ms").add(iter_latency_ms)
 

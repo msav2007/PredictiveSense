@@ -133,7 +133,7 @@ class Samples:
 
 
 class Timer:
-    """Context manager measuring wall-clock duration with ``time.perf_counter``.
+    """Context manager measuring elapsed duration with ``time.monotonic``.
 
     Optionally records the elapsed milliseconds into a :class:`Samples` on exit.
     """
@@ -144,11 +144,11 @@ class Timer:
         self.elapsed_ms = 0.0
 
     def __enter__(self) -> "Timer":
-        self._start = time.perf_counter()
+        self._start = time.monotonic()
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        self.elapsed_ms = (time.perf_counter() - self._start) * 1000.0
+        self.elapsed_ms = (time.monotonic() - self._start) * 1000.0
         if self._sink is not None:
             self._sink.add(self.elapsed_ms)
 
