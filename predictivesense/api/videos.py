@@ -69,9 +69,13 @@ async def analyze(request: Request, body: AnalyzeRequest) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="replay_mode must be realtime|asfast")
 
     driver = RecordedDriver(results_dir=config.results_dir)
+    perception = getattr(request.app.state, "perception", None)
     try:
         result = driver.run(
-            target, replay_mode=replay_mode, config_profile=config.profile
+            target,
+            replay_mode=replay_mode,
+            config_profile=config.profile,
+            perception=perception,
         )
     except (RuntimeError, OSError) as exc:
         _LOG.error("recorded analysis failed for %s: %r", target, exc)
@@ -82,4 +86,7 @@ async def analyze(request: Request, body: AnalyzeRequest) -> dict[str, object]:
         "jsonl_path": result["jsonl_path"],
         "frames": result["frames"],
         "replay_mode": result["replay_mode"],
+        "perception": bool(result.get("perception_enabled")),
+        "detections": result.get("total_detections", 0),
+        "poses": result.get("total_poses", 0),
     }

@@ -20,11 +20,16 @@ from predictivesense.camera.mailbox import LatestFrameMailbox
 from predictivesense.camera.source import FrameSource, create_frame_source
 from predictivesense.config.settings import AppConfig, ConfigError
 from predictivesense.core.enums import SourceKind
-from predictivesense.core.types import StateSnapshot
+from predictivesense.core.types import Detection, Pose, StateSnapshot
 from predictivesense.logging_setup import get_logger
+from predictivesense.perception.engine import PerceptionEngine, build_perception
 from predictivesense.telemetry.metrics import MetricRegistry
 
 __all__ = ["AnalysisLoop", "build_loop", "build_camera_source"]
+
+# Rolling window for detector/pose latency percentiles - small so the per-frame
+# sort in Samples.percentile stays negligible on the hot path.
+_PERCEPTION_LATENCY_WINDOW = 600
 
 _LOG = get_logger(__name__)
 _JOIN_TIMEOUT_S = 5.0
@@ -42,11 +47,25 @@ class AnalysisLoop:
         mailbox: LatestFrameMailbox,
         *,
         registry: MetricRegistry | None = None,
+        perception: PerceptionEngine | None = None,
     ) -> None:
         self._config = config
         self._source = source
         self._mailbox = mailbox
         self.metrics = registry or MetricRegistry()
+        self._perception = perception
+        self._perception_frames = 0
+        self._perception_errors = 0
+        self._perception_static: dict[str, float] = {}
+        if perception is not None:
+            info = perception.info()
+            self._perception_static = {
+                "detector_warmup_ms": float(info.get("detector_warmup_ms", -1.0)),
+                "pose_warmup_ms": float(info.get("pose_warmup_ms", -1.0)),
+            }
+            # Pre-register with a small window so percentile access is cheap.
+            self.metrics.samples("detector_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
+            self.metrics.samples("pose_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
 
         self._sample_period = 1.0 / config.consumer.sample_rate_hz
         self._stale_after_ms = config.consumer.stale_after_ms
@@ -82,6 +101,12 @@ class AnalysisLoop:
     @property
     def source(self) -> FrameSource:
         return self._source
+
+    @property
+    def perception(self) -> PerceptionEngine | None:
+        """The perception engine driving this loop, or ``None`` when off/absent."""
+
+        return self._perception
 
     @property
     def mailbox(self) -> LatestFrameMailbox:
@@ -247,6 +272,13 @@ class AnalysisLoop:
         )
 
         capture_ts = frame.capture_ts if frame is not None else None
+
+        detections: list[Detection] = []
+        poses: list[Pose] = []
+        perception_metrics: dict[str, float] = {}
+        if frame is not None and self._perception is not None:
+            detections, poses, perception_metrics = self._run_perception(frame)
+
         emitted_ts = time.monotonic()
         frame_age_ms = (
             (emitted_ts - capture_ts) * 1000.0 if capture_ts is not None else None
@@ -274,6 +306,7 @@ class AnalysisLoop:
             "frame_age_ms": frame_age_ms if frame_age_ms is not None else -1.0,
         }
         self._merge_source_metrics(metrics)
+        metrics.update(perception_metrics)
 
         self._snapshot_id += 1
         snapshot = StateSnapshot(
@@ -283,8 +316,8 @@ class AnalysisLoop:
             capture_ts=capture_ts,
             emitted_ts=emitted_ts,
             frame_age_ms=frame_age_ms,
-            detections=[],
-            poses=[],
+            detections=detections,
+            poses=poses,
             tracks=[],
             risk=None,
             metrics=metrics,
@@ -319,6 +352,52 @@ class AnalysisLoop:
         buffer_dropped = info.get("buffer_dropped")
         if isinstance(buffer_dropped, (int, float)):
             metrics["dropped_analysis_frames"] += float(buffer_dropped)
+
+    def _run_perception(
+        self, frame: Any
+    ) -> tuple[list[Detection], list[Pose], dict[str, float]]:
+        """Detector + pose for one sampled frame. Never raises into the loop."""
+
+        try:
+            result = self._perception.infer(frame)
+        except Exception as exc:  # noqa: BLE001 - a perception bug must not kill the loop
+            self._perception_errors += 1
+            _LOG.error("perception engine raised on frame %s: %r", frame.frame_id, exc)
+            return [], [], {"perception_frame_errors": float(self._perception_errors)}
+
+        self._perception_frames += 1
+        if result.frame_error:
+            self._perception_errors += 1
+
+        det_samples = self.metrics.samples("detector_ms")
+        pose_samples = self.metrics.samples("pose_ms")
+        if result.detector_ms is not None:
+            det_samples.add(result.detector_ms)
+        if result.pose_ms is not None:
+            pose_samples.add(result.pose_ms)
+
+        last_detector = result.detector_ms if result.detector_ms is not None else -1.0
+        last_pose = result.pose_ms if result.pose_ms is not None else -1.0
+        combined = 0.0
+        if result.detector_ms is not None:
+            combined += result.detector_ms
+        if result.pose_ms is not None:
+            combined += result.pose_ms
+
+        metrics = {
+            "detector_ms": last_detector,
+            "pose_ms": last_pose,
+            "perception_ms": combined,
+            "detector_ms_p50": det_samples.p50 if det_samples.count else -1.0,
+            "detector_ms_p95": det_samples.p95 if det_samples.count else -1.0,
+            "pose_ms_p50": pose_samples.p50 if pose_samples.count else -1.0,
+            "pose_ms_p95": pose_samples.p95 if pose_samples.count else -1.0,
+            "detections_per_frame": float(len(result.detections)),
+            "poses_per_frame": float(len(result.poses)),
+            "perception_frame_errors": float(self._perception_errors),
+        }
+        metrics.update(self._perception_static)
+        return list(result.detections), list(result.poses), metrics
 
     def _emit(self, snapshot: StateSnapshot) -> None:
         for listener in self._listeners:
@@ -417,10 +496,19 @@ def build_camera_source(config: AppConfig) -> FrameSource:
 
 
 def build_loop(
-    config: AppConfig, *, registry: MetricRegistry | None = None
+    config: AppConfig,
+    *,
+    registry: MetricRegistry | None = None,
+    perception: PerceptionEngine | None = None,
 ) -> AnalysisLoop:
-    """Construct a loop with the frame source described by ``config``."""
+    """Construct a loop with the frame source and perception engine from ``config``.
+
+    Perception is built from ``config.perception`` unless one is passed in. A
+    missing weight file degrades to no perception (Phase 1.6 behaviour) rather
+    than raising - see :func:`predictivesense.perception.engine.build_perception`.
+    """
 
     source = build_camera_source(config)
     mailbox = LatestFrameMailbox()
-    return AnalysisLoop(config, source, mailbox, registry=registry)
+    engine = perception if perception is not None else build_perception(config)
+    return AnalysisLoop(config, source, mailbox, registry=registry, perception=engine)

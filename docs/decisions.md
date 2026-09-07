@@ -130,3 +130,101 @@ passed, 1 skipped** (+18 UI static-analysis tests).
   as JavaScript).
 - **No new dependency, no CUDA, no cloud, no CDN/external font.** Everything
   ships from `static/`. `analysis-worker.js` is byte-unchanged.
+
+## Phase 2 - perception (detection + pose) (2026-09-07)
+
+Per-frame perception only: no tracking, identity, association, temporal state,
+risk or voice. `core/types.py` shape is unchanged - `Detection` / `Pose` were
+defined in Phase 0 for this. Full numbers in `docs/phase-reports/phase2.md`.
+
+- **Models: Ultralytics YOLO11n + YOLO11n-pose, pre-exported ONNX, AGPL-3.0.**
+  Taken from the `ultralytics/assets` `v8.3.0` GitHub release as ready ONNX, so
+  **no `torch` / `ultralytics` install** is needed to run them. The AGPL-3.0
+  licence is an **open, unresolved decision** recorded prominently in
+  `docs/attribution.md` - not resolved in this phase. `models/*.onnx` are
+  git-ignored; only `models/manifest.json` (names, URLs, sha256, sizes, licence,
+  input sizes) is committed. `scripts/fetch_models.py` downloads + verifies the
+  hashes and refuses to use a file on mismatch; it is a manual setup script, not
+  part of the runtime package, so the outbound-network guard test is untouched
+  (it scans `predictivesense/`, never `scripts/`).
+- **onnxruntime pinned at 1.24.4 (CPU).** 1.20.x rejected the models (opset 22 >
+  its max 21); 1.24.4 supports opset 22 and has a matching
+  `onnxruntime-directml==1.24.4` for the isolated `.venv-dml`. Runtime dependency
+  in `pyproject.toml`; imported **only** under `predictivesense/perception/`
+  (amended `tests/unit/test_no_forbidden_imports.py`: `onnxruntime` scoped to
+  `perception/`, `cv2` now allowed under `camera/` **and** `perception/`).
+- **Model-agnostic wrappers.** `ObjectDetector` / `PoseEstimator` take model
+  path, input size, thresholds and the NMS variant from `config.perception`; the
+  class-name list is read from the ONNX `names` metadata when present, else the
+  COCO-80 default in `perception/classes.py`. Swapping to a different ONNX model
+  is a config change, not a code change. No per-model class-list *file* was wired
+  (the metadata path covers the realistic cases); add one if a model without
+  embedded names is ever used.
+- **Per-class confidence thresholds.** `detector.default_conf` (0.35) with a
+  `detector.class_thresholds` map for overrides - a single global threshold is
+  not acceptable. Overrides are left empty until the class-coverage audit
+  verdicts land (`results/class_coverage.md`).
+- **Provider selection is explicit and verified.** `perception/runtime.create_
+  session` requests `[chosen_ep, CPUExecutionProvider]` (CPU only for per-op
+  fallback), then asserts the chosen EP is actually in `session.get_providers()`
+  and raises otherwise - a requested provider is never reported as the one in
+  use, and there is no silent fallback to a different provider. A missing model
+  file or an input size a locked model rejects fails loudly.
+- **Default provider = `cpu`, chosen from the measured table** (`results/
+  providers_cpu.json` vs `results/providers_dml.json`). DirectML on the Arc iGPU
+  **agrees with CPU numerically** (count-match 1.0, class-agreement 1.0, mean
+  |box diff| 0.0 px, max 0.002 px) but is **~2.2x slower** for these nano models
+  (combined detector+pose p50 216 ms vs 96 ms; ~9 fps vs ~21 fps per model, both at intra_op_threads=6) -
+  the tiny kernels never saturate the iGPU while the 14-core CPU does. So the
+  agreement check would *pass* but the speed check fails. `perception.provider`
+  is `cpu` in both profiles with a comment naming the result files. OpenVINO /
+  NPU were **not evaluated** (optional/deferred per Block 3.4.16).
+- **Loop / API degrade; scripts fail loud.** `build_perception(config, strict=)`:
+  `strict=False` (analysis loop, `POST /api/analyze`) logs one warning and runs
+  **without** perception when weights are absent - never kills the loop or the
+  preview (Block 7's harder constraint). `strict=True` (`fetch`/benchmark/audit
+  scripts, `models`-marked tests) raises. With `perception.*_enabled` both off
+  the pipeline is exactly Phase 1.6 (no session loaded, empty lists).
+- **`StateSnapshot.metrics` gains keys only** (map stays `dict[str, float]`):
+  `detector_ms`, `pose_ms`, `perception_ms`, `detector_ms_p50/p95`,
+  `pose_ms_p50/p95` (small 600-sample window so the percentile sort is cheap on
+  the hot path), `detections_per_frame`, `poses_per_frame`,
+  `detector_warmup_ms`, `pose_warmup_ms`, `perception_frame_errors`. `-1.0` is
+  the "not measured / not run" sentinel, matching the Phase 1 `frame_age_ms`
+  convention. No key was renamed or removed.
+- **`RecordedDriver.run(..., perception=)`** runs the identical engine; JSONL
+  lines now carry real `detections` / `poses` at fixed precision (2 dp coords,
+  4 dp scores) in fixed key order. Determinism now includes the model: CPU ORT
+  is deterministic for identical input, so two runs over one clip + config +
+  weights are byte-identical (`test_recorded_determinism_with_models.py`).
+  Without a `perception=` argument the output is exactly the Phase 1 shape, so
+  the existing `test_recorded_driver.py` is untouched.
+- **`scripts/run_noop.py` forces perception off.** It measures the Phase 0
+  synthetic loop and its 25 MB RSS budget; loading ~60 MB of ORT + weights for
+  no signal on synthetic noise would break that budget. `benchmark_providers.py`
+  is where perception cost is measured.
+- **UI: the reserved `analysis` slot is filled, not renegotiated.**
+  `groups/constants.js` keeps `GROUP_ORDER.analysis = 50`; only the
+  `RESERVED_GROUP_IDS` array dropped `"analysis"` (still lists `alerts`,
+  `research`). `groups/analysis.js` is a host that renders the Detection and Pose
+  sub-modules registered via the existing `registerAnalysisModule(...)`. The
+  Phase 1.6 shell / registry / `static/ui/*` are untouched. The Phase 1.6 guard
+  `tests/unit/test_ui_structure.py` was updated to expect `analysis` registered
+  and only `alerts`/`research` reserved - same precedent as Phase 1 updating the
+  Phase 0 `index.html` string assertions.
+- **Overlay draws on `#overlay-layer` only.** A `<canvas>` sized to the
+  letterboxed `<video>` display rect; the `<video>` element is never read, drawn
+  into, or replaced. Live overlay is browser-ingest only (backend-camera mode
+  has no preview; recorded analysis is retrospective and does not stream
+  `/ws/state`), so the coordinate reference is `capture.analysis_width/height`.
+  Low-confidence-band detections render dashed + dimmed; low-visibility keypoints
+  de-emphasised; a stale snapshot dims the overlay and labels it `STALE`. No
+  track IDs (no tracker).
+- **UI perception toggles are overlay-layer visibility**, initialised from
+  `perception.detection_enabled` / `pose_enabled` and persisted per-viewer in
+  `localStorage` (`features/analysis-prefs.js`). The server-side flags decide
+  whether the backend runs each model at all. **No API route was added.**
+- **Test fixtures `tests/fixtures/perception/*.jpg` are 3 frames of the
+  developer's own `data/raw/` recording** (~55 KB each), committed so the
+  `models`-marked pipeline test has real content (`person`, one `cup`). Pure
+  synthetic images produce no detections and would make the test vacuous.

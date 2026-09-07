@@ -71,3 +71,38 @@ recorder:
 video:
   input_dir: data/videos
   replay_mode: asfast
+
+# Phase 2 perception. Both models run on the sampled analysis frame in real-time
+# and recorded modes. Turn both *_enabled off to reproduce Phase 1.6 exactly.
+perception:
+  detection_enabled: true
+  pose_enabled: true
+  # pose_every_n stays 1: the input-size sweep (docs/phase-reports/phase2.md
+  # "Measured") shows detector+pose fit the 10 fps / 100 ms budget at input 640
+  # on CPU with headroom. Raise only if a slower machine needs it.
+  pose_every_n: 1
+  # ORT intra-op threads per session. Auto (all 18 logical cores) over-subscribes
+  # with two sessions + the loop threads: measured combined p50 collapsed to
+  # ~440 ms. 6 is the measured knee (~90-110 ms combined). See phase2.md.
+  intra_op_threads: 6
+  # Provider chosen from results/providers_cpu.json vs results/providers_dml.json
+  # (docs/phase-reports/phase2.md "Measured", docs/decisions.md). DirectML on the
+  # Arc iGPU AGREES with CPU numerically (class-agreement 1.0, mean |box diff|
+  # 0.0 px) but is ~2.2x SLOWER for these nano models (combined p50 216 ms vs 96 ms) -
+  # the tiny kernels never saturate the GPU while the 14-core CPU does.
+  # Default: cpu.
+  provider: cpu
+  detector:
+    model_path: models/yolo11n.onnx
+    input_size: 640            # sweep {320,480,640}: 640 keeps small objects; see report
+    nms_iou: 0.5
+    default_conf: 0.35
+    class_thresholds: {}       # per-class overrides go here once the audit verdicts land
+    low_confidence_band: [0.35, 0.50]   # rendered dashed / dimmed on the overlay
+    max_detections: 100
+  pose:
+    model_path: models/yolo11n-pose.onnx
+    input_size: 640            # yolo11n-pose ONNX locks its input to 640x640
+    conf: 0.4
+    max_persons: 4
+    keypoint_visibility_threshold: 0.3

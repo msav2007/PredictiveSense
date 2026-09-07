@@ -28,6 +28,9 @@ __all__ = [
     "CaptureConfig",
     "RecorderConfig",
     "VideoConfig",
+    "DetectorConfig",
+    "PoseConfig",
+    "PerceptionConfig",
     "available_profiles",
     "load_config",
     "default_profiles_dir",
@@ -152,6 +155,89 @@ class VideoConfig(_Section):
     replay_mode: Literal["realtime", "asfast"] = "asfast"
 
 
+class DetectorConfig(_Section):
+    """ONNX object detector. Model-agnostic: path, input size, thresholds and the
+    NMS variant all come from here, so swapping the ONNX model is a config change,
+    not a code change (see ``docs/decisions.md``)."""
+
+    model_path: Path = Field(default=Path("models/yolo11n.onnx"))
+    input_size: int = Field(gt=0, default=640)
+    nms_iou: float = Field(gt=0.0, le=1.0, default=0.5)
+    # Documented default; per-class overrides live in ``class_thresholds`` and are
+    # set from the class-coverage audit. A single global threshold is not enough.
+    default_conf: float = Field(gt=0.0, le=1.0, default=0.35)
+    class_thresholds: dict[str, float] = Field(default_factory=dict)
+    # Detections whose score falls in this half-open band render dashed / dimmed.
+    low_confidence_band: tuple[float, float] = Field(default=(0.35, 0.50))
+    max_detections: int = Field(gt=0, default=100)
+
+    @field_validator("input_size")
+    @classmethod
+    def _multiple_of_stride(cls, value: int) -> int:
+        if value % 32 != 0:
+            raise ValueError("detector input_size must be a multiple of 32")
+        return value
+
+    @field_validator("low_confidence_band")
+    @classmethod
+    def _band_ordered(cls, value: tuple[float, float]) -> tuple[float, float]:
+        lo, hi = value
+        if not (0.0 <= lo <= hi <= 1.0):
+            raise ValueError("low_confidence_band must be [lo, hi] with 0 <= lo <= hi <= 1")
+        return value
+
+    @field_validator("class_thresholds")
+    @classmethod
+    def _thresholds_in_range(cls, value: dict[str, float]) -> dict[str, float]:
+        for name, thr in value.items():
+            if not (0.0 < thr <= 1.0):
+                raise ValueError(f"class_thresholds[{name!r}] must be in (0, 1]")
+        return value
+
+
+class PoseConfig(_Section):
+    """ONNX pose estimator. Same model-agnostic rule as :class:`DetectorConfig`."""
+
+    model_path: Path = Field(default=Path("models/yolo11n-pose.onnx"))
+    input_size: int = Field(gt=0, default=640)
+    conf: float = Field(gt=0.0, le=1.0, default=0.4)
+    max_persons: int = Field(gt=0, default=4)
+    keypoint_visibility_threshold: float = Field(ge=0.0, le=1.0, default=0.3)
+
+    @field_validator("input_size")
+    @classmethod
+    def _multiple_of_stride(cls, value: int) -> int:
+        if value % 32 != 0:
+            raise ValueError("pose input_size must be a multiple of 32")
+        return value
+
+
+class PerceptionConfig(_Section):
+    """Phase 2 per-frame perception. With both ``*_enabled`` off the pipeline
+    behaves exactly as Phase 1.6 (no models loaded, empty detections/poses)."""
+
+    detection_enabled: bool = True
+    pose_enabled: bool = True
+    # Run pose only every Nth sampled frame if the latency budget demands it.
+    # Measure before raising this above 1.
+    pose_every_n: int = Field(ge=1, default=1)
+    # ONNX Runtime intra-op threads per session. 0 = ORT default (all cores),
+    # which OVER-subscribes badly with two sessions + the loop's other threads
+    # (measured: combined detector+pose p50 collapses from ~90 ms to ~440 ms
+    # under contention). 6 is the measured knee on this 14C/18T machine.
+    intra_op_threads: int = Field(ge=0, default=6)
+    # Chosen from results/providers_*.json. "cpu" is plain onnxruntime; "dml"
+    # requires onnxruntime-directml in a separate environment (never the main
+    # .venv); "openvino" is optional/deferred.
+    provider: Literal["cpu", "dml", "openvino"] = "cpu"
+    detector: DetectorConfig = Field(default_factory=DetectorConfig)
+    pose: PoseConfig = Field(default_factory=PoseConfig)
+
+    @property
+    def any_enabled(self) -> bool:
+        return self.detection_enabled or self.pose_enabled
+
+
 class AppConfig(BaseSettings):
     """The fully resolved configuration for one run.
 
@@ -178,6 +264,7 @@ class AppConfig(BaseSettings):
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
     recorder: RecorderConfig = Field(default_factory=RecorderConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
+    perception: PerceptionConfig = Field(default_factory=PerceptionConfig)
 
     def as_json_dict(self) -> dict[str, Any]:
         """Resolved config as a JSON-serialisable dict (for the manifest and API)."""

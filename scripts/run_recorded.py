@@ -16,6 +16,7 @@ from pathlib import Path
 
 from predictivesense.config.settings import ConfigError, ValidationError, load_config
 from predictivesense.logging_setup import configure_logging, get_logger
+from predictivesense.perception.engine import build_perception
 from predictivesense.pipeline.recorded import RecordedDriver
 
 _LOG = get_logger("predictivesense.scripts.run_recorded")
@@ -26,6 +27,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--profile", default="eval", help="config profile (default: eval)")
     parser.add_argument("--path", required=True, help="video file, absolute or relative to video.input_dir")
     parser.add_argument("--replay-mode", choices=("realtime", "asfast"), default=None)
+    parser.add_argument(
+        "--no-perception",
+        action="store_true",
+        help="skip detection/pose even if the profile enables them",
+    )
     return parser.parse_args(argv)
 
 
@@ -50,9 +56,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     replay_mode = args.replay_mode or config.video.replay_mode
+
+    perception = None
+    if not args.no_perception:
+        try:
+            perception = build_perception(config, strict=True)
+        except FileNotFoundError as exc:
+            _LOG.error("%s", exc)
+            return 2
+
     driver = RecordedDriver(results_dir=config.results_dir)
     try:
-        result = driver.run(target, replay_mode=replay_mode, config_profile=config.profile)
+        result = driver.run(
+            target,
+            replay_mode=replay_mode,
+            config_profile=config.profile,
+            perception=perception,
+        )
     except (RuntimeError, OSError) as exc:
         _LOG.error("recorded run failed: %r", exc)
         return 1
@@ -62,6 +82,9 @@ def main(argv: list[str] | None = None) -> int:
     _LOG.info("source      : %s", result["source_path"])
     _LOG.info("replay mode : %s", result["replay_mode"])
     _LOG.info("frames      : %d", result["frames"])
+    _LOG.info("perception  : %s", "on" if perception is not None else "off")
+    _LOG.info("detections  : %d", result.get("total_detections", 0))
+    _LOG.info("poses       : %d", result.get("total_poses", 0))
     _LOG.info("jsonl       : %s", result["jsonl_path"])
     _LOG.info("manifest    : %s", result["manifest_path"])
     return 0

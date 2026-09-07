@@ -117,6 +117,10 @@ def create_app(
     app.state.loop = analysis_loop
     app.state.broadcaster = broadcaster
     app.state.browser_source = browser_source
+    # Shared by POST /api/analyze so recorded runs use the identical perception
+    # code and do not re-create ONNX sessions per request. None when perception is
+    # disabled or its weights are absent (then recorded output is the Phase 1.6 shape).
+    app.state.perception = analysis_loop.perception
     app.state.session_id = uuid.uuid4().hex
     app.state.ingest_stats = {
         "frames": 0.0,

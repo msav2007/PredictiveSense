@@ -81,24 +81,67 @@ def profiles_dir() -> Path:
     return default_profiles_dir()
 
 
+_PERCEPTION_MODELS = [
+    _REPO_ROOT / "models" / "yolo11n.onnx",
+    _REPO_ROOT / "models" / "yolo11n-pose.onnx",
+]
+
+
+def _without_perception(cfg: AppConfig) -> AppConfig:
+    """Disable perception on a config.
+
+    The broad regression suite must stay fast and must reproduce Phase 1.6
+    behaviour exactly; perception has dedicated ``models``-marked coverage. The
+    shipped ``dev`` / ``eval`` profiles keep perception ON - asserted by
+    ``tests/unit/test_config.py`` - this only affects the shared fixtures.
+    """
+
+    return cfg.model_copy(
+        update={
+            "perception": cfg.perception.model_copy(
+                update={"detection_enabled": False, "pose_enabled": False}
+            )
+        }
+    )
+
+
 @pytest.fixture()
 def dev_config() -> AppConfig:
-    return load_config("dev")
+    return _without_perception(load_config("dev"))
 
 
 @pytest.fixture()
 def eval_config() -> AppConfig:
-    return load_config("eval")
+    return _without_perception(load_config("eval"))
 
 
 @pytest.fixture()
 def browser_config() -> AppConfig:
     """``dev`` profile with the browser ingest source (capture.owner stays browser)."""
 
-    cfg = load_config("dev")
+    cfg = _without_perception(load_config("dev"))
     return cfg.model_copy(
         update={"source": cfg.source.model_copy(update={"kind": SourceKind.BROWSER})}
     )
+
+
+@pytest.fixture()
+def perception_dev_config() -> AppConfig:
+    """``dev`` profile with perception left ON (models-marked tests)."""
+
+    return load_config("dev")
+
+
+@pytest.fixture()
+def require_models() -> None:
+    """Skip cleanly (never fail, never silently pass) when weights are absent."""
+
+    missing = [p.name for p in _PERCEPTION_MODELS if not p.is_file()]
+    if missing:
+        pytest.skip(
+            f"perception weights absent ({', '.join(missing)}); "
+            f"run `python scripts/fetch_models.py`"
+        )
 
 
 @pytest.fixture(scope="session")

@@ -1,9 +1,12 @@
-"""Static analysis of the shipped dashboard assets (Phase 1.6).
+"""Static analysis of the shipped dashboard assets (Phase 1.6 shell, Phase 2 fills
+the Analysis slot).
 
 No browser automation, no new dependency - just read the files under
 ``predictivesense/api/static/`` and assert the interface architecture holds:
-a shell mount (not a legacy panel stack), five registered groups each exporting
-the extension contract, and the three reserved ids declared-but-not-registered.
+a shell mount (not a legacy panel stack), the registered groups each exporting
+the extension contract, and the still-reserved ids declared-but-not-registered.
+Phase 2 registered ``analysis`` (Detection + Pose sub-modules); ``alerts`` and
+``research`` remain reserved.
 """
 
 from __future__ import annotations
@@ -20,8 +23,8 @@ pytestmark = pytest.mark.unit
 _STATIC = Path(predictivesense.__file__).resolve().parent / "api" / "static"
 _GROUPS = _STATIC / "groups"
 
-REGISTERED_GROUP_IDS = ["input", "camera", "video", "dataset", "diagnostics"]
-RESERVED_GROUP_IDS = ["analysis", "alerts", "research"]
+REGISTERED_GROUP_IDS = ["input", "camera", "video", "dataset", "analysis", "diagnostics"]
+RESERVED_GROUP_IDS = ["alerts", "research"]
 
 
 def _read(p: Path) -> str:
@@ -89,6 +92,34 @@ def test_registry_rejects_duplicate_and_reserved_ids() -> None:
     assert "duplicate group id" in src
     assert "reserved" in src
     assert "registerAnalysisModule" in src, "the analysis sub-module contract must exist for later phases"
+
+
+def test_analysis_group_hosts_detection_and_pose_submodules() -> None:
+    analysis = _read(_GROUPS / "analysis.js")
+    assert re.search(r'export\s+const\s+id\s*=\s*"analysis"', analysis)
+    assert "registerAnalysisModule" in analysis
+    assert "/static/features/detection.js" in analysis
+    assert "/static/features/pose.js" in analysis
+    for feat in ("detection.js", "pose.js", "overlay.js", "analysis-prefs.js"):
+        assert (_STATIC / "features" / feat).is_file(), f"features/{feat} missing"
+    # the reserved slot was filled, not renegotiated
+    consts = _read(_GROUPS / "constants.js")
+    assert "analysis: 50" in consts
+    assert '"analysis"' not in _read_reserved_ids_line(consts)
+
+
+def _read_reserved_ids_line(consts: str) -> str:
+    m = re.search(r"RESERVED_GROUP_IDS\s*=\s*\[[^\]]*\]", consts)
+    return m.group(0) if m else ""
+
+
+def test_overlay_never_touches_the_video_element() -> None:
+    overlay = _read(_STATIC / "features" / "overlay.js")
+    # draws on #overlay-layer, not into <video>
+    assert "overlay-layer" in overlay
+    assert "getContext" in overlay
+    for banned in ("video.src =", "video.srcObject =", "drawImage(video", "video.play("):
+        assert banned not in overlay, f"overlay.js must not do {banned!r}"
 
 
 def test_extension_contract_documented_with_example() -> None:

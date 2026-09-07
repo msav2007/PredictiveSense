@@ -45,7 +45,7 @@ files losslessly.
 
 - `predictivesense/core/enums.py` - `Mode`, `SourceKind` (`SYNTHETIC`/`DEVICE`/`FILE`/`BROWSER` constructible; `WEBRTC` never), `RiskLevel`, `TrackStatus`, and the "constructible source kind" guard.
 - `predictivesense/core/types.py` - all frozen contracts (Block 8). Imports only stdlib, numpy, Pydantic, and `core.enums`. Phase 1 added `SourceInfo`, `ClipManifest`, `IngestHeader`.
-- `predictivesense/config/settings.py` - typed settings, YAML profile loading, strict validation, env overrides (`PS_` prefix, `__` nesting). Phase 1 sections: `capture` (incl. tuning knobs `fourcc`/`buffer_size`/`warmup_frames` and Phase 1.5's `max_ws_buffered_bytes` worker-backpressure ceiling, default 1 MB - all default to the measured-optimal value), `recorder`, `video`.
+- `predictivesense/config/settings.py` - typed settings, YAML profile loading, strict validation, env overrides (`PS_` prefix, `__` nesting). Phase 1 sections: `capture` (incl. tuning knobs `fourcc`/`buffer_size`/`warmup_frames` and Phase 1.5's `max_ws_buffered_bytes` worker-backpressure ceiling, default 1 MB - all default to the measured-optimal value), `recorder`, `video`. Phase 2 section: `perception` (`detection_enabled`/`pose_enabled`/`pose_every_n`/`intra_op_threads` (6 - measured knee; auto over-subscribes)/`provider` (cpu), nested `detector` + `pose` sub-sections per Block 6).
 - `predictivesense/camera/_opencv.py` - `quiet_opencv_logging()` (idempotent `cv2.setLogLevel(ERROR)` - kills the VIDEOIO index-probe spam) and `fourcc_to_str()`.
 - `predictivesense/camera/source.py` - `FrameSource` interface + `create_frame_source` (builds only `SYNTHETIC`; other kinds raise `NotImplementedError` - built by `pipeline.build_camera_source` / `RecordedDriver`).
 - `predictivesense/camera/synthetic.py` - `SyntheticSource`: deterministic, strictly increasing `frame_id` / `capture_ts`, paced to a target rate.
@@ -55,27 +55,31 @@ files losslessly.
 - `predictivesense/camera/browser.py` - `BrowserSource`: single-slot newest-wins buffer fed by `WS /ws/ingest`; decodes JPEG, stamps `capture_ts` from the clock offset.
 - `predictivesense/camera/device.py` - `DeviceSource`: OpenCV camera, MSMF->DSHOW fallback (or cache-hinted backend first when `backend="auto"` + `backend_cache_dir`), reports *achieved* geometry. Reconnect is **non-blocking and `stop()`-interruptible** (one short reopen probe per `read()`, exponential backoff absorbed outside the lock via a `threading.Event`); no thread is added here.
 - `predictivesense/camera/file_source.py` - `FileSource`: sequential decode, pts-based `capture_ts`, `asfast`/`realtime` replay, deterministic `restart()`; `video_duration_s()` helper.
-- `predictivesense/pipeline/loop.py` - `AnalysisLoop` (+ `build_camera_source`, `request_consumer_stall`): producer thread + no-op consumer + lifecycle + error surfacing + Phase 1 metric keys.
-- `predictivesense/pipeline/recorded.py` - `RecordedDriver`: Mode B, no mailbox, every frame, byte-deterministic `results/recorded_<run_id>.jsonl` + manifest.
+- `predictivesense/pipeline/loop.py` - `AnalysisLoop` (+ `build_camera_source`, `request_consumer_stall`): producer thread + consumer + lifecycle + error surfacing + Phase 1 metric keys. Phase 2: takes an optional `PerceptionEngine`; the consumer runs `_run_perception(frame)` per iteration, populates `StateSnapshot.detections`/`.poses` and adds `detector_ms*`/`pose_ms*`/`perception_ms`/`detections_per_frame`/`poses_per_frame`/`*_warmup_ms`/`perception_frame_errors` metric keys. A perception exception is counted and dropped, never fatal.
+- `predictivesense/pipeline/recorded.py` - `RecordedDriver`: Mode B, no mailbox, every frame, byte-deterministic `results/recorded_<run_id>.jsonl` + manifest. Phase 2: `run(..., perception=engine)` writes real `detections`/`poses` at fixed precision; determinism now includes the model (CPU ORT is deterministic). No `perception=` -> exactly the Phase 1 empty shape.
+- `predictivesense/perception/` - Phase 2 per-frame perception (detection + pose only; no tracking/identity/temporal/risk/voice). `runtime.py` (ORT session, explicit provider selection + verification, warm-up, `intra_op_threads`), `preprocess.py` (letterbox + coord mapping, pure NumPy), `postprocess.py` (`xywh_to_xyxy`, `nms`, `class_aware_nms`), `classes.py` (COCO-80, 12 required classes, alias map, 17 keypoints, skeleton, `class_color`), `detector.py` (`ObjectDetector.infer -> list[Detection]`, per-class thresholds, class list from ONNX `names` metadata), `pose.py` (`PoseEstimator.infer -> list[Pose]`), `engine.py` (`PerceptionEngine` + `build_perception(config, strict=)`: `strict=False` degrades to no-perception when weights absent; `strict=True` raises), `types.py` (`PerceptionResult` internal aggregate). `onnxruntime` + `cv2` are imported only here and under `camera/`.
 - `predictivesense/telemetry/metrics.py` - `Counter`, `Rate`, `Samples`, `Timer`, `MetricRegistry` (all bounded).
 - `predictivesense/telemetry/writer.py` - `MetricsWriter`: append-only CSV, write failure logged once and non-fatal.
 - `predictivesense/telemetry/manifest.py` - `SessionManifest` + `build_manifest` + `git_state`.
 - `predictivesense/api/app.py` - FastAPI factory and routes; mounts the ingest/recorder/videos routers and `/static`; starts/stops the loop over the lifespan; `write_manifest=True` writes `results/session_<id>.json`. Phase 1.5: `POST /api/metrics/browser` appends a labelled browser-measured sample block to `results/browser_metrics_<label>.json`.
 - `predictivesense/api/ingest.py` - `WS /ws/ingest`: hello/ack/echo handshake + binary analysis frames -> `BrowserSource`.
 - `predictivesense/api/recorder.py` - `POST /api/record/upload` + `GET /api/clips`: raw clip -> `data/raw/<session>/` + `ClipManifest`.
-- `predictivesense/api/videos.py` - `GET /api/videos` + `POST /api/analyze` (path confined to `video.input_dir`).
+- `predictivesense/api/videos.py` - `GET /api/videos` + `POST /api/analyze` (path confined to `video.input_dir`). Phase 2: `/api/analyze` passes `app.state.perception` (the loop's engine, or None) to `RecordedDriver` so recorded runs use the identical perception code without re-creating sessions.
 - `predictivesense/api/broadcast.py` - `Broadcaster` + `serve_state_client`: last-value-wins, slow client dropped on timeout.
 - `predictivesense/api/static/` - dashboard. No framework, no build; ES modules served by the `/static` mount. **Phase 1.6** reorganised it into an application shell:
   - `index.html` - shell skeleton only (top bar, viewport with `<video id="preview" autoplay muted playsinline>` + `#overlay-layer`, empty `#panel-body`). `app.js` - composition root: fetch config, `registerGroup` x5, mount shell + registry.
   - `ui/` - `store.js` (observable UI state, `localStorage`), `shell.js`, `group.js`, `registry.js` (`registerGroup` / `registerAnalysisModule`), `controls.js` (`settingRow`/`actionButton{variant}`/`statusIndicator`/`metricRow`/`el`), `format.js` (label maps, `REPLAY_MODES`, `PREVIEW_UNAVAILABLE_TEXT`), `log.js` (the only `console.log`, gated by the Diagnostics toggle).
-  - `groups/` - `constants.js` (`GROUP_ORDER`, `RESERVED_GROUP_IDS = analysis/alerts/research`), then one module per panel section: `input`, `camera`, `video`, `dataset`, `diagnostics`. Each exports `id,title,order,modes,view,summary,render,update?`.
-  - `features/` - logic moved out of `app.js` essentially verbatim: `runtime.js` (shared capture state + event bus), `camera-capture.js`, `analysis-client.js` (owns the Worker), `recording.js`, `videos.js`, `metrics.js`.
+  - `groups/` - `constants.js` (`GROUP_ORDER`; `RESERVED_GROUP_IDS = alerts/research` after Phase 2 filled `analysis`), then one module per panel section: `input`, `camera`, `video`, `dataset`, `analysis` (Phase 2), `diagnostics`. Each exports `id,title,order,modes,view,summary,render,update?`.
+  - `features/` - logic moved out of `app.js` essentially verbatim: `runtime.js` (shared capture state + event bus), `camera-capture.js`, `analysis-client.js` (owns the Worker), `recording.js`, `videos.js`, `metrics.js`. Phase 2: `detection.js` + `pose.js` (analysis sub-modules via `registerAnalysisModule`), `overlay.js` (draws boxes/skeletons on `#overlay-layer`; never touches `<video>`; dashed+dimmed for the low-confidence band; `STALE` label when stale; no track IDs), `analysis-prefs.js` (per-viewer overlay-layer toggles, init from config, persisted).
   - `analysis-worker.js` - **unchanged** (newest-wins + `bufferedAmount` backpressure + `VideoFrame` close audit; `capture.max_ws_buffered_bytes`).
   - Input mode (`Real-time` / `Recorded video`) is **client-side view state** (`store`, persisted) - it does not touch the server `mode` config; recorded analysis still runs via `POST /api/analyze`, and the recorded-mode viewport plays a locally chosen file (no endpoint). Every engineering metric lives in the Diagnostics group (hidden until the top-bar toggle; raw keys shown next to renamed labels). `POST /api/metrics/browser` + the Browser-measurement block are in Diagnostics.
 - `predictivesense/logging_setup.py` - `configure_logging` / `get_logger`.
 - `scripts/run_app.py` - start the API for a profile (`--source-kind synthetic|browser|device`).
-- `scripts/run_noop.py` - 60-second instrumented no-op run (synthetic); writes `results/noop_<id>.csv` and `results/manifest_<id>.json`.
-- `scripts/run_recorded.py` - run `RecordedDriver` over one file under `data/videos/`.
+- `scripts/run_noop.py` - 60-second instrumented no-op run (synthetic); writes `results/noop_<id>.csv` and `results/manifest_<id>.json`. Phase 2: forces perception off (it measures the Phase 0 loop + its 25 MB RSS budget).
+- `scripts/run_recorded.py` - run `RecordedDriver` over one file under `data/videos/`. Phase 2: builds perception from the profile (`--no-perception` to skip); fails loud (exit 2) if weights are missing.
+- `scripts/fetch_models.py` - **manual** build-time model fetch: downloads + SHA-256-verifies `yolo11n.onnx` / `yolo11n-pose.onnx` per `models/manifest.json`, writes the AGPL licence text. Not imported by the package; excluded from the outbound-network guard by path.
+- `scripts/benchmark_providers.py` - `--provider cpu|dml`: both models over a fixed clip -> warm-up / p50 / p95 / max / throughput / peak RSS + agreement check vs the CPU baseline -> `results/providers_<provider>.{json,md}`. DirectML runs from a separate `.venv-dml`.
+- `scripts/class_coverage_audit.py` - `--source <clip-or-dir>`: detector over the developer's footage -> per required class: frames-with-detection, rate, conf p10/p50/p90, median box-area fraction, multi-count frames; top unexpected classes; a developer verdict column -> `results/class_coverage.{json,md}`. **Frequencies, not accuracy** - there are no labels.
 - `scripts/benchmark_transport.py` - backend-owned camera transport benchmark -> `results/transport_<label>.json`.
 - `scripts/benchmark_camera_matrix.py` - Phase 1.5: backend-owned matrix sweep (resolution x fps x backend x fourcc) -> `results/camera_matrix_<label>.{json,md}` + merges the winning backend into `results/camera_backends.json`.
 - `scripts/benchmark_analysis_path.py` - Phase 1.5: in-process loopback sweep of `analysis_fps` x size x quality through the real `BrowserSource`->mailbox->loop -> `results/analysis_sweep_<label>.{json,md}`.
@@ -106,6 +110,18 @@ python scripts\run_app.py --profile dev --source-kind browser   # Phase 1 browse
 python scripts\run_noop.py --profile dev --seconds 60           # writes results\
 python scripts\run_recorded.py --profile eval --path <clip> --replay-mode asfast
 python scripts\benchmark_transport.py --index 0 --seconds 30 --label laptop-cam
+
+# --- Phase 2 perception ---
+python scripts\fetch_models.py                                  # manual, once; verifies sha256
+pytest -q -m models                                             # skips cleanly if models/ is empty
+python scripts\benchmark_providers.py --provider cpu
+py -3.11 -m venv .venv-dml; .\.venv-dml\Scripts\Activate.ps1
+pip install -e "."; pip install onnxruntime-directml==1.24.4    # NEVER into the main .venv
+python scripts\benchmark_providers.py --provider dml; deactivate
+.\.venv\Scripts\Activate.ps1
+python scripts\class_coverage_audit.py --source data\raw
+python scripts\run_recorded.py --profile eval --path <clip>     # now populates detections/poses
+
 # regenerate the lock file (UTF-8, no BOM; Windows PowerShell 5.1 has no utf8NoBOM):
 $f = & .\.venv\Scripts\python.exe -m pip freeze --exclude-editable
 [IO.File]::WriteAllText("$PWD\requirements.lock.txt", ($f -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
@@ -142,8 +158,11 @@ $f = & .\.venv\Scripts\python.exe -m pip freeze --exclude-editable
 - **No `console.log`** outside `static/ui/log.js` (the Diagnostics-gated logger).
   No unbounded listener list - `store.subscribe` returns an unsubscribe.
 - **Input mode is client-side view state only** - it must not mutate the server
-  `mode` config or add an API route. Reserved group ids `analysis` / `alerts` /
-  `research` are constants; do not create a module for them, not even empty.
+  `mode` config or add an API route. Reserved group ids `alerts` / `research` are
+  constants; do not create a module for them, not even empty. (`analysis` was
+  reserved in Phase 1.6 and is now filled by Phase 2 - `groups/analysis.js` hosts
+  the Detection + Pose sub-modules via `registerAnalysisModule`; `overlay.js`
+  draws on `#overlay-layer` only, never into `<video>`.)
 
 ### Where does a new control go?
 
@@ -154,25 +173,59 @@ $f = & .\.venv\Scripts\python.exe -m pip freeze --exclude-editable
 | A recorded file: selection, replay speed, Analyse, output | `video` | recorded | normal |
 | Recording a research clip, scenario tag, notes, consent, clip list | `dataset` | both | normal |
 | Any FPS / drop / latency / byte / socket / worker counter, provider info | `diagnostics` | both | diagnostics |
-| Detection / pose / tracking readouts (later phase) | `analysis` *(reserved, order 50)* | both | normal |
+| Detection / pose readouts | `analysis` *(order 50, Phase 2; Detection + Pose sub-modules via `registerAnalysisModule`)* | both | normal |
 | Risk warnings, alert log, TTS state (later phase) | `alerts` *(reserved, order 60)* | both | normal |
 | Session manifest, run metadata, export (later phase) | `research` *(reserved, order 70)* | both | normal |
 
 ## Phase discipline
 
-Current phase: **Phase 1 (Input layer)** - see `PredictiveSense-P1-Prompt.md`.
-Never implement a future phase or leave an empty placeholder for one. No
-detector, pose, tracker, temporal state, risk model, policy, TTS, or overlay
-drawing belongs here. If a requirement is ambiguous, **stop and ask** rather than
-inventing one. Never claim a performance number that was not produced by a
-command actually run on this machine, and never claim physical (camera / mic /
-speaker) verification - Phase 1 has six developer checks still pending.
+Current phase: **Phase 2 (Perception - detection + pose) COMPLETE** - see
+`PredictiveSense-P2-Prompt.md`. Per-frame perception only: **no** tracker, track
+IDs, association, `Relation`, temporal state, risk model, alert policy or TTS -
+none started, none placeheld. `StateSnapshot.tracks` is still always `[]`. No
+fine-tuning / training / dataset pipeline. Never report detection frequency as
+accuracy / precision / recall / mAP - there is no labelled data. Never claim a
+performance number not produced by a command run on this machine, or a physical
+(camera / mic / speaker) check not performed - the Block 11 checks are pending.
+**Do not start Phase 3.**
 
 ## Current phase status
 
-Phase 1 complete, including Phase 1.5 (camera/input optimization & verification
-closing pass) and **Phase 1.6 (interface architecture)**. `pytest -q`:
-**145 passed, 1 skipped** (hardware; `--run-hardware` to run). 10-minute
+Phase 2 complete. `pytest -q`: **205 passed, 1 skipped** (hardware;
+`--run-hardware`); `pytest -q -m models` = 11 passed and skips cleanly when
+`models/` is empty. See `docs/phase-reports/phase2.md` (three-part format),
+`docs/architecture.md` "Phase 2", `docs/decisions.md` "Phase 2",
+`docs/attribution.md` (AGPL open decision).
+
+Phase 2 summary: ONNX detector (`yolo11n`) + pose (`yolo11n-pose`), pre-exported
+ONNX fetched + hash-verified by `scripts/fetch_models.py` (weights git-ignored;
+**AGPL-3.0, open licence decision** in `docs/attribution.md`). `onnxruntime==
+1.24.4` (CPU) added as a runtime dep, imported only under `perception/`. Both
+models run on the same sampled frame in the analysis loop and in `RecordedDriver`
+(byte-deterministic with models). `StateSnapshot.detections`/`.poses` populated;
+contracts unchanged; metrics gained keys only. UI: `groups/analysis.js` fills the
+reserved slot with Detection + Pose sub-modules; `features/overlay.js` draws
+boxes/skeletons on `#overlay-layer` (dashed+dimmed low-confidence band, `STALE`
+label, no track IDs); Diagnostics gained a Perception block. Toggling perception
+off reproduces Phase 1.6 exactly. **Measured (this machine):** detector p50
+~44 ms / pose p50 ~44 ms isolated (CPU, input 640); combined collapses to ~440 ms
+under thread contention unless `perception.intra_op_threads` is capped -> shipped
+at **6** (knee), giving combined ~90-110 ms; with perception on, browser-ingest
+analysis holds **~10 fps** (matches the 10 fps feed) with **~2.7 % steady-state
+drop** and frame age ~50 ms -> ~146 ms; DirectML (isolated `.venv-dml`) **agrees
+with CPU to 0.0 px mean box diff but is ~2.7x slower** on these nano models ->
+default `provider: cpu`; input-size sweep {320,480,640} tabled
+(`results/input_size_sweep.md`). Preview independence re-verified with perception
+running (`test_preview_independence_holds_with_perception_running`): socket keeps
+accepting, mailbox stays single-slot, producer alive. Class-coverage audit run
+over the one clip in `data/raw/` (`results/class_coverage.md`) - **detection
+frequencies, not accuracy**; `person` 100 %, `cup`/`cell phone` low, others 0 on
+that single clip; verdict column is the developer's. **Block 11 physical checks
+pending** (no camera ran the overlay this pass - Browser pane blocks capture).
+
+### Phase 1 (historical)
+
+`pytest -q` was **145 passed, 1 skipped** at end of Phase 1.6. 10-minute
 synthetic no-op RSS within budget; `DeviceSource` RSS flat over 30 s of real
 capture.
 

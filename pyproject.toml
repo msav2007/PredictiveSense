@@ -21,6 +21,9 @@ dependencies = [
     "psutil==6.1.1",
     "opencv-python==4.10.0.84",
     "python-multipart==0.0.20",
+    # Phase 2 perception. CPU build only in the main .venv; the DirectML build
+    # (onnxruntime-directml, same module name) is installed ONLY in .venv-dml.
+    "onnxruntime==1.24.4",
 ]
 
 [project.optional-dependencies]
@@ -51,4 +54,5 @@ markers = [
     "integration: multiple components wired together",
     "slow: runs for several seconds or more",
     "hardware: requires a physical camera; skipped unless --run-hardware is passed",
+    "models: requires ONNX weights under models/; skips cleanly when they are absent",
 ]

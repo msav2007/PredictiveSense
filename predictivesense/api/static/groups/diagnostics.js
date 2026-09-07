@@ -56,6 +56,30 @@ export function render(body) {
   body.append(grid);
   body.append(el("p", { class: "note", id: "ingest-note", text: "analysis worker: idle" }));
 
+  // ---- Phase 2 perception ----
+  const p = (runtime.config && runtime.config.perception) || {};
+  const det = p.detector || {};
+  const pos = p.pose || {};
+  body.append(el("p", { class: "subhead", text: "Perception" }));
+  body.append(
+    el("dl", { class: "kv-list" }, [
+      kv("provider", String(p.provider ?? "—")),
+      kv("detector model", baseName(det.model_path) + " @ " + (det.input_size ?? "—")),
+      kv("pose model", baseName(pos.model_path) + " @ " + (pos.input_size ?? "—")),
+      kv("pose_every_n", String(p.pose_every_n ?? 1)),
+    ]),
+  );
+  const pgrid = el("dl", { class: "metric-grid", id: "perception-metric-grid" });
+  for (const [key, label] of PERCEPTION_METRICS) {
+    pgrid.append(
+      el("div", {}, [
+        el("dt", {}, [label, el("span", { class: "raw-key", text: ` ${key}` })]),
+        el("dd", { id: `m-${key}`, text: "—" }),
+      ]),
+    );
+  }
+  body.append(pgrid);
+
   const cap = (runtime.config && runtime.config.capture) || {};
   body.append(
     el("p", { class: "subhead", text: "Provider" }),
@@ -87,10 +111,43 @@ export function render(body) {
   initMetrics();
 }
 
-export function update() {
+// [raw key, label]. Populated from StateSnapshot.metrics by update(); -1 -> "—".
+const PERCEPTION_METRICS = [
+  ["detector_ms_p50", "Detector p50 (ms)"],
+  ["detector_ms_p95", "Detector p95 (ms)"],
+  ["pose_ms_p50", "Pose p50 (ms)"],
+  ["pose_ms_p95", "Pose p95 (ms)"],
+  ["perception_ms", "Perception per frame (ms)"],
+  ["detections_per_frame", "Detections / frame"],
+  ["poses_per_frame", "Poses / frame"],
+  ["detector_warmup_ms", "Detector warm-up (ms)"],
+  ["pose_warmup_ms", "Pose warm-up (ms)"],
+  ["perception_frame_errors", "Perception frame errors"],
+];
+
+function kv(label, value) {
+  return el("div", {}, [el("dt", { text: label }), el("dd", { text: value })]);
+}
+
+function baseName(p) {
+  return typeof p === "string" ? p.split(/[\\/]/).pop() : "—";
+}
+
+export function update(state) {
   const cell = document.getElementById("m-worker_skips");
-  if (!cell) return;
-  const wm = runtime.workerMetrics || {};
-  cell.textContent =
-    wm.skipThrottle == null ? "—" : `${wm.skipThrottle} / ${wm.skipBusy} / ${wm.skipBackpressure}`;
+  if (cell) {
+    const wm = runtime.workerMetrics || {};
+    cell.textContent =
+      wm.skipThrottle == null
+        ? "—"
+        : `${wm.skipThrottle} / ${wm.skipBusy} / ${wm.skipBackpressure}`;
+  }
+  const m = (state && state.snapshot && state.snapshot.metrics) || {};
+  for (const [key] of PERCEPTION_METRICS) {
+    const dd = document.getElementById(`m-${key}`);
+    if (!dd) continue;
+    const v = m[key];
+    const digits = key.includes("per_frame") || key.includes("errors") ? 2 : 1;
+    dd.textContent = v === undefined || v === null || v < 0 ? "—" : Number(v).toFixed(digits);
+  }
 }

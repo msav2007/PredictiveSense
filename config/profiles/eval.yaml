@@ -62,3 +62,29 @@ recorder:
 video:
   input_dir: data/videos
   replay_mode: asfast
+
+# Phase 2 perception - identical model/settings to dev so Mode B (recorded)
+# analysis and Mode A (real-time) run the same code. RecordedDriver output is
+# byte-deterministic for a given model + config + file.
+perception:
+  detection_enabled: true
+  pose_enabled: true
+  pose_every_n: 1
+  intra_op_threads: 6        # measured knee on 14C/18T; auto over-subscribes (phase2.md)
+  # cpu: DirectML agrees numerically but is ~2.2x slower for these nano models on
+  # the Arc iGPU (results/providers_cpu.json vs providers_dml.json).
+  provider: cpu
+  detector:
+    model_path: models/yolo11n.onnx
+    input_size: 640
+    nms_iou: 0.5
+    default_conf: 0.35
+    class_thresholds: {}
+    low_confidence_band: [0.35, 0.50]
+    max_detections: 100
+  pose:
+    model_path: models/yolo11n-pose.onnx
+    input_size: 640
+    conf: 0.4
+    max_persons: 4
+    keypoint_visibility_threshold: 0.3

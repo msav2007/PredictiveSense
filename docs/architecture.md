@@ -378,3 +378,104 @@ Unchanged from Phase 1: no detector, pose, tracker, temporal state, risk model,
 alert policy, TTS, or overlay drawing. `#overlay-layer` is an empty transparent
 container. The `analysis`, `alerts`, `research` group ids are reserved constants
 only - no module, not even empty.
+
+---
+
+# Phase 2 - perception (detection + pose)
+
+Per-frame perception: an ONNX object detector and an ONNX pose estimator run on
+the **same** sampled analysis frame, in both Mode A (real-time) and Mode B
+(recorded), through identical code. No tracking, identity, association, temporal
+state, risk or voice - those consume this output in later phases.
+
+## Shape
+
+```
+sampled Frame ─▶ PerceptionEngine.infer(frame)
+                   ├─ ObjectDetector.infer ─▶ list[Detection]   (letterbox → ORT → decode → per-class NMS → map back)
+                   └─ PoseEstimator.infer  ─▶ list[Pose]        (every frame, or every Nth if pose_every_n > 1)
+                        │
+     AnalysisLoop._iterate ─▶ StateSnapshot.detections / .poses + perception metric keys
+                        │
+       /ws/state ─▶ store ─▶ groups/analysis.js (Detection + Pose sub-modules) + features/overlay.js (canvas on #overlay-layer)
+```
+
+`RecordedDriver.run(..., perception=engine)` calls the identical engine and
+writes real `detections` / `poses` into each JSONL line.
+
+## Package `predictivesense/perception/`
+
+| module | responsibility |
+|---|---|
+| `runtime.py` | `create_session(model_path, provider, input_size)` - one reusable `onnxruntime.InferenceSession`, **explicit** provider list `[chosen, CPU]`, asserts the chosen EP is actually active (no silent fallback, never reports the requested EP as in-use), warm-up on a zeros blob, logs the EP actually used. `PROVIDER_ALIASES = {cpu, dml, openvino}`. |
+| `preprocess.py` | `letterbox(image, size)` - aspect-preserving resize to a square NCHW RGB `[0,1]` blob + ratio/pad; `scale_boxes_to_original` / `scale_points_to_original` undo it. Pure NumPy, unit-tested without weights. |
+| `postprocess.py` | `xywh_to_xyxy`, single-class `nms`, `class_aware_nms` (per-class, `max_detections`, empty-safe). Pure NumPy. |
+| `classes.py` | COCO-80 list, the 12 required classes, `ALIAS_MAP` (raw label → UI label, distinct targets), `alias_for`, 17 `KEYPOINT_NAMES`, `SKELETON_EDGES`, deterministic `class_color`. |
+| `detector.py` | `ObjectDetector.infer(frame) -> list[Detection]`. Class list from the model's ONNX `names` metadata, else COCO. Per-class thresholds (`default_conf` + `class_thresholds`). |
+| `pose.py` | `PoseEstimator.infer(frame) -> list[Pose]`. Decodes `4 + 1 + 17*3`; person-box NMS; top `max_persons`; keypoints `(x, y, visibility)`. |
+| `engine.py` | `PerceptionEngine` (owns both sessions, `pose_every_n` gating, per-frame try/except that counts failures and keeps the loop alive, `info()` for Diagnostics) and `build_perception(config, strict=)`. |
+| `types.py` | `PerceptionResult` - internal (non-wire) bundle of one frame's detections/poses + per-model latency. |
+
+## Models - build-time, never runtime
+
+`models/` is git-ignored except `manifest.json`. `python scripts/fetch_models.py`
+downloads `yolo11n.onnx` + `yolo11n-pose.onnx` (pre-exported ONNX from the
+`ultralytics/assets` v8.3.0 release), verifies the committed SHA-256s, refuses to
+use a file on mismatch, and writes `LICENSE-AGPL-3.0.txt`. **No `torch` /
+`ultralytics`** is installed. **Runtime makes no network call** - the guard test
+(`tests/integration/test_no_outbound_network.py`) scans `predictivesense/`, never
+`scripts/`. The **AGPL-3.0** licence of these weights is an open, unresolved
+decision (`docs/attribution.md`).
+
+## Providers
+
+`onnxruntime`, `onnxruntime-directml` and `onnxruntime-openvino` share the module
+name and cannot coexist. The main `.venv` has plain `onnxruntime==1.24.4` (CPU).
+`scripts/benchmark_providers.py --provider cpu|dml` runs both models over a fixed
+clip and reports warm-up / p50 / p95 / max / throughput / peak RSS plus, for a
+non-CPU provider, a numerical agreement check against the CPU baseline (count
+match, class agreement, mean/max |box diff|). DirectML runs from a **separate**
+`.venv-dml` with `onnxruntime-directml==1.24.4`. Measured on this machine:
+DirectML agrees with CPU to 0.0 px mean box difference but is ~2.2x slower for
+these nano models on the Arc iGPU → **default `perception.provider: cpu`**.
+OpenVINO / NPU: not evaluated (deferred).
+
+## `StateSnapshot.metrics` - new keys (additive; map stays `dict[str, float]`)
+
+`detector_ms`, `pose_ms`, `perception_ms`, `detector_ms_p50` / `_p95`,
+`pose_ms_p50` / `_p95` (600-sample window), `detections_per_frame`,
+`poses_per_frame`, `detector_warmup_ms`, `pose_warmup_ms`,
+`perception_frame_errors`. `-1.0` = "not measured / not run" (Phase 1
+convention). No rename, no reshape. With `perception.*_enabled` both off none of
+these keys appear and `.detections` / `.poses` are `[]` - exactly Phase 1.6.
+
+## UI
+
+`groups/analysis.js` fills the reserved `analysis` slot (order 50). It hosts two
+sub-modules registered via the existing `registerAnalysisModule(...)`:
+`features/detection.js` and `features/pose.js` (each: overlay toggle, read-only
+model / input size / thresholds, live summary line). `features/overlay.js`
+creates a `<canvas>` inside `#overlay-layer`, sizes it to the letterboxed
+`<video>` display rect (ResizeObserver + `loadedmetadata`), and draws per
+snapshot: detection boxes (per-class deterministic colour, alias label,
+confidence + bar; **dashed + dimmed** inside `low_confidence_band`), pose
+skeletons (low-visibility keypoints de-emphasised), and a `STALE` label with the
+overlay dimmed when the snapshot is stale. **The `<video>` is never read, drawn
+into, or replaced.** No track IDs. `features/analysis-prefs.js` holds the
+per-viewer overlay-layer toggles (init from config, persisted in `localStorage`);
+the server-side `perception.*_enabled` flags decide whether the backend runs each
+model. **No API route added.** Diagnostics gains a Perception block (provider,
+model names + input sizes, `pose_every_n`, detector/pose p50/p95, per-frame
+counts, warm-up times, frame errors).
+
+The Phase 1.6 shell / `static/ui/*` / registry are untouched; `constants.js` only
+moved `analysis` out of `RESERVED_GROUP_IDS` (`alerts`, `research` still
+reserved).
+
+## Still absent after Phase 2
+
+No tracker, track IDs, association, `Relation`, temporal features, risk model,
+alert policy, TTS. `StateSnapshot.tracks` is still always `[]`. No fine-tuning,
+no training, no dataset pipeline. No accuracy / precision / recall / mAP figure
+exists - there is no labelled data; `results/class_coverage.md` is detection
+frequency on unlabelled footage.

@@ -96,6 +96,18 @@ def main(argv: list[str] | None = None) -> int:
         _LOG.error("configuration error: %s", exc)
         return 2
 
+    # The no-op run measures the Phase 0 synthetic producer/consumer loop and its
+    # RSS budget. Phase 2 perception is a separate concern (scripts/benchmark_
+    # providers.py) and would load ~60 MB of ONNX Runtime + weights for no signal
+    # on synthetic noise - force it off here regardless of the profile.
+    config = config.model_copy(
+        update={
+            "perception": config.perception.model_copy(
+                update={"detection_enabled": False, "pose_enabled": False}
+            )
+        }
+    )
+
     seconds = args.seconds if args.seconds is not None else config.noop.default_seconds
     results_dir = Path(config.results_dir)
     try:

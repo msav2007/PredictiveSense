@@ -16,7 +16,6 @@ PACKAGE_ROOT = Path(predictivesense.__file__).resolve().parent
 # Never allowed anywhere in the package.
 FORBIDDEN_MODULES = {
     "torch",
-    "onnxruntime",
     "openvino",
     "mediapipe",
     "ultralytics",
@@ -29,14 +28,26 @@ FORBIDDEN_MODULES = {
 # Submodule imports that must also be caught.
 FORBIDDEN_QUALIFIED = {"urllib.request"}
 
-# Allowed, but only within this subpackage (Phase 1: OpenCV camera / file / codec).
-CAMERA_ONLY_MODULES = {"cv2"}
+# Allowed, but only within the listed subpackages.
+#   cv2         - Phase 1 camera / file / codec  +  Phase 2 perception (letterbox,
+#                 JPEG decode for the audit fixture path).
+#   onnxruntime - Phase 2 perception only. `scripts/` is not part of the package
+#                 tree scanned here, so the setup / benchmark / audit scripts are
+#                 excluded from this runtime guard by path.
 CAMERA_DIR = PACKAGE_ROOT / "camera"
+PERCEPTION_DIR = PACKAGE_ROOT / "perception"
+SCOPED_MODULES = {
+    "cv2": (CAMERA_DIR, PERCEPTION_DIR),
+    "onnxruntime": (PERCEPTION_DIR,),
+}
+# Back-compat alias for the cv2-only helper tests below.
+CAMERA_ONLY_MODULES = {"cv2"}
 
 CORE_FORBIDDEN_INTERNAL_PREFIXES = (
     "predictivesense.api",
     "predictivesense.pipeline",
     "predictivesense.camera",
+    "predictivesense.perception",
 )
 
 
@@ -85,18 +96,29 @@ def test_no_module_imports_a_forbidden_library() -> None:
     assert not offenders, "forbidden imports found:\n" + "\n".join(offenders)
 
 
-def test_cv2_is_imported_only_under_camera() -> None:
+def test_scoped_modules_imported_only_in_their_subpackages() -> None:
     offenders: list[str] = []
     for path in _module_files():
         source = path.read_text(encoding="utf-8")
-        for module in CAMERA_ONLY_MODULES:
+        for module, allowed_dirs in SCOPED_MODULES.items():
             if _scan_for_module(source, str(path), module):
-                if CAMERA_DIR not in path.parents:
-                    offenders.append(f"{path.relative_to(PACKAGE_ROOT)} imports {module}")
-    assert not offenders, (
-        "cv2 (and other camera-only modules) may be imported only under "
-        "predictivesense/camera/:\n" + "\n".join(offenders)
+                if not any(d in path.parents for d in allowed_dirs):
+                    where = " or ".join(
+                        f"predictivesense/{d.name}/" for d in allowed_dirs
+                    )
+                    offenders.append(
+                        f"{path.relative_to(PACKAGE_ROOT)} imports {module} "
+                        f"(allowed only under {where})"
+                    )
+    assert not offenders, "scoped-import violations:\n" + "\n".join(offenders)
+
+
+def test_onnxruntime_is_actually_used_under_perception() -> None:
+    used = any(
+        _scan_for_module(p.read_text(encoding="utf-8"), str(p), "onnxruntime")
+        for p in sorted(PERCEPTION_DIR.rglob("*.py"))
     )
+    assert used, "expected at least one onnxruntime import under predictivesense/perception/"
 
 
 def test_cv2_is_actually_used_under_camera() -> None:

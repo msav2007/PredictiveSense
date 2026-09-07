@@ -21,6 +21,7 @@ import * as inputGroup from "/static/groups/input.js";
 import * as cameraGroup from "/static/groups/camera.js";
 import * as videoGroup from "/static/groups/video.js";
 import * as datasetGroup from "/static/groups/dataset.js";
+import * as analysisGroup from "/static/groups/analysis.js";
 import * as diagnosticsGroup from "/static/groups/diagnostics.js";
 
 import { initAnalysisClient } from "/static/features/analysis-client.js";
@@ -32,7 +33,14 @@ import {
 } from "/static/features/camera-capture.js";
 import { showRecordedViewport, clearRecordedViewport } from "/static/features/videos.js";
 
-const GROUPS = [inputGroup, cameraGroup, videoGroup, datasetGroup, diagnosticsGroup];
+const GROUPS = [
+  inputGroup,
+  cameraGroup,
+  videoGroup,
+  datasetGroup,
+  analysisGroup,
+  diagnosticsGroup,
+];
 
 async function main() {
   runtime.config = await fetch("/api/config").then((r) => r.json());
