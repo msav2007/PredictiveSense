@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 
 import cv2
@@ -17,17 +18,21 @@ _lock = threading.Lock()
 
 
 def quiet_opencv_logging() -> None:
-    """Drop OpenCV's global log level to ERROR, once.
+    """Drop OpenCV's (and its FFmpeg wrapper's) log verbosity, once.
 
     The MSMF/DSHOW back ends emit a ``[ WARN ] ... can't be used to capture by
-    index`` line for every probe of a non-existent camera index; enumeration
-    sweeps 0..9 and floods stdout. Genuine errors are still shown.
+    index`` line for every probe of a non-existent camera index (enumeration
+    sweeps 0..9); the FFmpeg reader prints ``EBML header parsing failed`` when
+    the clip-duration probe is handed a partial/garbage file. Both are expected
+    and noisy. Genuine errors are still shown.
     """
 
     global _quieted
     with _lock:
         if _quieted:
             return
+        # AV_LOG level -8 = quiet; read lazily by OpenCV's FFmpeg wrapper.
+        os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
         try:
             cv2.setLogLevel(_LOG_LEVEL_ERROR)
         except (AttributeError, cv2.error):  # pragma: no cover - build-dependent

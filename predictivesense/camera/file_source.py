@@ -44,6 +44,9 @@ _TS_DECIMALS = 6  # round pts seconds to avoid float-repr drift in JSONL output
 def video_duration_s(path: str | Path) -> float | None:
     """Best-effort clip duration in seconds via OpenCV; ``None`` if unreadable."""
 
+    from predictivesense.camera._opencv import quiet_opencv_logging
+
+    quiet_opencv_logging()
     cap = cv2.VideoCapture(str(path))
     try:
         if not cap.isOpened():
@@ -205,6 +208,9 @@ class FileSource:
     # -- internals ------------------------------------------------
 
     def _open_locked(self) -> None:
+        from predictivesense.camera._opencv import quiet_opencv_logging
+
+        quiet_opencv_logging()
         cap = cv2.VideoCapture(str(self._path))
         if not cap.isOpened():
             cap.release()
