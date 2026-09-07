@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic import ValidationError as _PydanticValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -102,6 +102,17 @@ class CaptureConfig(_Section):
     request_width: int = Field(gt=0, default=1280)
     request_height: int = Field(gt=0, default=720)
     request_fps: float = Field(gt=0, default=30.0)
+    # "auto" leaves the backend to negotiate the pixel format (measured best on
+    # the integrated camera - forcing MJPG gave no FPS gain and adds JPEG-decode
+    # CPU). Set a 4-char code (e.g. "MJPG") only for a webcam that needs it.
+    fourcc: str = Field(default="auto")
+    # CAP_PROP_BUFFERSIZE. 1 = keep only the newest frame (lowest latency).
+    # No-op on MSMF; honoured by some DSHOW / virtual-camera paths.
+    buffer_size: int = Field(ge=1, default=1)
+    # Frames to read and discard immediately after (re)open, for cameras that
+    # emit a few dark/garbage frames on start. Measured unnecessary for the
+    # integrated camera; left at 0.
+    warmup_frames: int = Field(ge=0, default=0)
     open_timeout_s: float = Field(gt=0, default=5.0)
     reconnect_initial_s: float = Field(gt=0, default=0.5)
     reconnect_max_s: float = Field(gt=0, default=8.0)
@@ -110,6 +121,13 @@ class CaptureConfig(_Section):
     analysis_height: int = Field(gt=0, default=480)
     analysis_jpeg_quality: float = Field(gt=0.0, le=1.0, default=0.7)
     max_ingest_message_bytes: int = Field(gt=0, default=2_000_000)
+
+    @field_validator("fourcc")
+    @classmethod
+    def _check_fourcc(cls, value: str) -> str:
+        if value != "auto" and len(value) != 4:
+            raise ValueError("fourcc must be 'auto' or a 4-character code like 'MJPG'")
+        return value
 
 
 class RecorderConfig(_Section):

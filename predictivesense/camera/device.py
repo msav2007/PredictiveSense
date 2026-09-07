@@ -7,10 +7,11 @@ Requested width/height/fps come from config; :meth:`info` reports what the
 device *actually* returned - the requested values are never echoed back as
 achievements.
 
-Read failures trigger a bounded exponential-backoff reconnect. The capture loop
-runs on the analysis loop's producer thread and hands frames to the mailbox,
-which never blocks; a reconnect backoff pauses only this source, never a
-consumer.
+Read failures schedule a **non-blocking** bounded exponential-backoff reopen:
+:meth:`read` never sleeps while holding the lock and never blocks longer than
+~0.25 s, so :meth:`stop` (device switching, shutdown) stays responsive and the
+producer thread does not spin. ``stop()`` sets an event that interrupts any wait
+and the open-probe loop.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from predictivesense.camera._opencv import fourcc_to_str, quiet_opencv_logging
 from predictivesense.core.enums import SourceKind
 from predictivesense.core.types import Frame, SourceInfo
 from predictivesense.logging_setup import get_logger
@@ -34,6 +36,11 @@ _BACKENDS = {
     "msmf": cv2.CAP_MSMF,
     "dshow": cv2.CAP_DSHOW,
 }
+# Short first-frame probe while recovering: a camera that is genuinely back
+# delivers a frame in well under this; otherwise the next backoff tick retries.
+# Keeps any single read() well bounded even in the down state.
+_RECONNECT_PROBE_S = 0.4
+_MAX_READ_WAIT_S = 0.25    # cap on any single wait inside read()
 
 
 class DeviceSource:
@@ -47,6 +54,9 @@ class DeviceSource:
         request_width: int = 1280,
         request_height: int = 720,
         request_fps: float = 30.0,
+        fourcc: str = "auto",
+        buffer_size: int = 1,
+        warmup_frames: int = 0,
         open_timeout_s: float = 5.0,
         reconnect_initial_s: float = 0.5,
         reconnect_max_s: float = 8.0,
@@ -58,15 +68,20 @@ class DeviceSource:
         self._req_w = int(request_width)
         self._req_h = int(request_height)
         self._req_fps = float(request_fps)
+        self._fourcc = fourcc
+        self._buffer_size = int(buffer_size)
+        self._warmup_frames = int(warmup_frames)
         self._open_timeout_s = float(open_timeout_s)
         self._reconnect_initial_s = float(reconnect_initial_s)
         self._reconnect_max_s = float(reconnect_max_s)
         self._source_id = f"device:{self._index}"
 
         self._lock = threading.Lock()
+        self._stop_evt = threading.Event()
         self._cap: cv2.VideoCapture | None = None
         self._running = False
         self._backend_name: str | None = None
+        self._fourcc_used: str | None = None
         self._achieved_w = 0
         self._achieved_h = 0
         self._achieved_fps: float | None = None
@@ -74,22 +89,30 @@ class DeviceSource:
         self._frame_id = -1          # monotonic per source
         self._seq = -1               # per session, reset on reconnect
         self._read_failures = 0
-        self._reconnects = 0
+        self._reconnects = 0             # successful recoveries after a failure
+        self._reconnect_attempts = 0     # reopen tries (success or fail)
         self._reconnect_seconds_total = 0.0
+        self._down_since: float | None = None   # monotonic when cap went None
+        self._retry_at = 0.0
+        self._backoff_s = 0.0
         self._time_to_first_frame_s: float | None = None
         self._start_mono = 0.0
 
     # -- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
+        quiet_opencv_logging()
         with self._lock:
             if self._running:
                 return
+            self._stop_evt.clear()
             self._start_mono = time.monotonic()
-            self._open_locked()
+            self._backoff_s = self._reconnect_initial_s
+            self._open_locked(self._open_timeout_s)
             self._running = True
 
     def stop(self) -> None:
+        self._stop_evt.set()  # interrupt any wait / open-probe in read()
         with self._lock:
             self._running = False
             self._release_locked()
@@ -97,37 +120,33 @@ class DeviceSource:
     # -- production ----------------------------------------------------
 
     def read(self) -> Frame | None:
-        if not self._running:
+        if not self._running or self._stop_evt.is_set():
             return None
+
+        wait_s = 0.0
         with self._lock:
-            cap = self._cap
-            if cap is None:
-                self._reconnect_locked()
-                cap = self._cap
-                if cap is None:
-                    return None
-            ok, image = cap.read()
-            if not ok or image is None:
+            if self._cap is not None:
+                ok, image = self._cap.read()
+                if ok and image is not None:
+                    return self._frame_from_locked(image)
                 self._read_failures += 1
-                self._reconnect_locked()
-                return None
+                self._release_locked()
+                self._down_since = time.monotonic()
+                self._retry_at = 0.0  # first retry is immediate
 
-            if self._time_to_first_frame_s is None:
-                self._time_to_first_frame_s = time.monotonic() - self._start_mono
-            self._frame_id += 1
-            self._seq += 1
-            frame_id, seq = self._frame_id, self._seq
+            now = time.monotonic()
+            if now >= self._retry_at:
+                if self._reopen_locked():
+                    return None  # next read() gets the first frame
+                self._retry_at = time.monotonic() + self._backoff_s
+                self._backoff_s = min(self._backoff_s * 2.0, self._reconnect_max_s)
+            wait_s = min(_MAX_READ_WAIT_S, max(0.0, self._retry_at - time.monotonic()))
 
-        height, width = int(image.shape[0]), int(image.shape[1])
-        return Frame(
-            frame_id=frame_id,
-            capture_ts=time.monotonic(),
-            image=np.ascontiguousarray(image),
-            width=width,
-            height=height,
-            source_id=self._source_id,
-            seq=seq,
-        )
+        # Absorb the backoff outside the lock so stop() is never blocked and the
+        # producer thread does not busy-spin on None.
+        if wait_s > 0:
+            self._stop_evt.wait(wait_s)
+        return None
 
     @property
     def is_running(self) -> bool:
@@ -135,11 +154,17 @@ class DeviceSource:
 
     def info(self) -> dict[str, Any]:
         with self._lock:
+            down_for = (
+                round(time.monotonic() - self._down_since, 3)
+                if self._down_since is not None
+                else 0.0
+            )
             return {
                 "source_id": self._source_id,
                 "kind": SourceKind.DEVICE.value,
                 "index": self._index,
                 "backend": self._backend_name,
+                "fourcc": self._fourcc_used,
                 "requested_width": self._req_w,
                 "requested_height": self._req_h,
                 "requested_fps": self._req_fps,
@@ -147,10 +172,13 @@ class DeviceSource:
                 "achieved_height": self._achieved_h,
                 "achieved_fps": self._achieved_fps,
                 "running": self._running,
+                "connected": self._cap is not None,
                 "frames_read": self._frame_id + 1,
                 "read_failures": self._read_failures,
                 "reconnects": self._reconnects,
+                "reconnect_attempts": self._reconnect_attempts,
                 "reconnect_seconds_total": round(self._reconnect_seconds_total, 3),
+                "currently_down_s": down_for,
                 "time_to_first_frame_s": self._time_to_first_frame_s,
             }
 
@@ -166,6 +194,7 @@ class DeviceSource:
                 backend=self._backend_name,
                 extra={
                     "index": str(self._index),
+                    "fourcc": self._fourcc_used or "auto",
                     "requested_fps": str(self._req_fps),
                     "reconnects": str(self._reconnects),
                 },
@@ -182,53 +211,116 @@ class DeviceSource:
 
     # -- internals ------------------------------------------------
 
+    def _frame_from_locked(self, image: np.ndarray) -> Frame:
+        """Build a Frame from a good read. Caller holds the lock. Resets backoff."""
+
+        if self._time_to_first_frame_s is None:
+            self._time_to_first_frame_s = time.monotonic() - self._start_mono
+        if self._down_since is not None:
+            self._reconnect_seconds_total += time.monotonic() - self._down_since
+            self._down_since = None
+        self._backoff_s = self._reconnect_initial_s
+        self._frame_id += 1
+        self._seq += 1
+        return Frame(
+            frame_id=self._frame_id,
+            capture_ts=time.monotonic(),
+            image=np.ascontiguousarray(image),
+            width=int(image.shape[1]),
+            height=int(image.shape[0]),
+            source_id=self._source_id,
+            seq=self._seq,
+        )
+
+    def _reopen_locked(self) -> bool:
+        """One reopen attempt. Caller holds the lock. Returns True on success."""
+
+        self._reconnect_attempts += 1
+        try:
+            self._open_locked(_RECONNECT_PROBE_S)
+        except RuntimeError as exc:
+            _LOG.warning(
+                "device %d reopen attempt %d failed: %s",
+                self._index,
+                self._reconnect_attempts,
+                exc,
+            )
+            return False
+        self._reconnects += 1
+        self._seq = -1  # sequence resets on reconnect
+        if self._down_since is not None:
+            self._reconnect_seconds_total += time.monotonic() - self._down_since
+            self._down_since = None
+        _LOG.info(
+            "device %d reconnected on attempt %d (backend=%s)",
+            self._index,
+            self._reconnect_attempts,
+            self._backend_name,
+        )
+        return True
+
     def _candidate_backends(self) -> list[tuple[str, int]]:
         if self._backend_pref == "auto":
             return [("msmf", _BACKENDS["msmf"]), ("dshow", _BACKENDS["dshow"])]
         return [(self._backend_pref, _BACKENDS[self._backend_pref])]
 
-    def _open_locked(self) -> None:
+    def _open_locked(self, probe_timeout_s: float) -> None:
         """Open the device, trying each candidate backend until one yields a frame."""
 
         last_err = "no backend attempted"
         for name, flag in self._candidate_backends():
+            if self._stop_evt.is_set():
+                raise RuntimeError("stop requested during open")
             cap = cv2.VideoCapture(self._index, flag)
+            if self._fourcc != "auto":
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self._fourcc))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._req_w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._req_h)
             cap.set(cv2.CAP_PROP_FPS, self._req_fps)
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, self._buffer_size)
+            except cv2.error:  # pragma: no cover - not all backends accept it
+                pass
 
             if not cap.isOpened():
                 cap.release()
                 last_err = f"{name}: VideoCapture did not open"
                 continue
 
-            deadline = time.monotonic() + self._open_timeout_s
-            got_frame = False
-            while time.monotonic() < deadline:
+            deadline = time.monotonic() + probe_timeout_s
+            image = None
+            while time.monotonic() < deadline and not self._stop_evt.is_set():
                 ok, image = cap.read()
                 if ok and image is not None:
-                    got_frame = True
                     break
-                time.sleep(0.05)
+                image = None
+                time.sleep(0.03)
 
-            if not got_frame:
+            if image is None:
                 cap.release()
-                last_err = f"{name}: no frame within {self._open_timeout_s:.1f}s"
+                last_err = f"{name}: no frame within {probe_timeout_s:.1f}s"
                 continue
+
+            for _ in range(self._warmup_frames):
+                if self._stop_evt.is_set():
+                    break
+                cap.read()
 
             self._cap = cap
             self._backend_name = name
+            self._fourcc_used = fourcc_to_str(cap.get(cv2.CAP_PROP_FOURCC)) or None
             self._achieved_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or int(image.shape[1])
             self._achieved_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or int(image.shape[0])
             fps = float(cap.get(cv2.CAP_PROP_FPS))
             self._achieved_fps = fps if fps > 0 else None
             _LOG.info(
-                "device %d opened via %s: %dx%d @ %s fps (requested %dx%d @ %.1f)",
+                "device %d opened via %s: %dx%d @ %s fps fourcc=%s (requested %dx%d @ %.1f)",
                 self._index,
                 name,
                 self._achieved_w,
                 self._achieved_h,
                 f"{self._achieved_fps:.2f}" if self._achieved_fps else "unknown",
+                self._fourcc_used or "auto",
                 self._req_w,
                 self._req_h,
                 self._req_fps,
@@ -247,32 +339,3 @@ class DeviceSource:
             except cv2.error as exc:  # pragma: no cover - release rarely fails
                 _LOG.warning("device %d release raised: %r", self._index, exc)
             self._cap = None
-
-    def _reconnect_locked(self) -> None:
-        """Bounded exponential-backoff reopen. Caller holds ``self._lock``."""
-
-        self._release_locked()
-        if not self._running:
-            return
-        self._reconnects += 1
-        backoff = self._reconnect_initial_s
-        attempt = 0
-        t0 = time.monotonic()
-        while self._running:
-            attempt += 1
-            time.sleep(backoff)
-            try:
-                self._open_locked()
-                elapsed = time.monotonic() - t0
-                self._reconnect_seconds_total += elapsed
-                _LOG.info(
-                    "device %d reconnected after %d attempt(s) / %.2fs",
-                    self._index,
-                    attempt,
-                    elapsed,
-                )
-                return
-            except RuntimeError as exc:
-                _LOG.warning("device %d reconnect attempt %d failed: %s", self._index, attempt, exc)
-                backoff = min(backoff * 2.0, self._reconnect_max_s)
-        self._reconnect_seconds_total += time.monotonic() - t0

@@ -1,0 +1,51 @@
+"""Shared OpenCV helpers for the camera package.
+
+``cv2`` is imported here (allowed only under ``predictivesense/camera/``).
+"""
+
+from __future__ import annotations
+
+import threading
+
+import cv2
+
+__all__ = ["quiet_opencv_logging", "fourcc_to_str"]
+
+_LOG_LEVEL_ERROR = 2  # cv2 log levels: 0 SILENT, 1 FATAL, 2 ERROR, 3 WARNING, ...
+_quieted = False
+_lock = threading.Lock()
+
+
+def quiet_opencv_logging() -> None:
+    """Drop OpenCV's global log level to ERROR, once.
+
+    The MSMF/DSHOW back ends emit a ``[ WARN ] ... can't be used to capture by
+    index`` line for every probe of a non-existent camera index; enumeration
+    sweeps 0..9 and floods stdout. Genuine errors are still shown.
+    """
+
+    global _quieted
+    with _lock:
+        if _quieted:
+            return
+        try:
+            cv2.setLogLevel(_LOG_LEVEL_ERROR)
+        except (AttributeError, cv2.error):  # pragma: no cover - build-dependent
+            pass
+        _quieted = True
+
+
+def fourcc_to_str(value: float | int) -> str:
+    """Decode a packed ``CAP_PROP_FOURCC`` value into its 4-char code.
+
+    MSMF reports an internal numeric format id rather than a real FOURCC; that
+    is surfaced as ``"raw:<n>"`` so logs and benchmark output stay readable.
+    """
+
+    code = int(value)
+    if code <= 0:
+        return ""
+    chars = "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4)).rstrip("\x00")
+    if chars and all(32 <= ord(c) < 127 for c in chars):
+        return chars
+    return f"raw:{code}"

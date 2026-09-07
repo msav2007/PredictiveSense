@@ -56,6 +56,10 @@ def _default_probe(index: int, backend_hint: str) -> tuple[bool, str | None]:
 
     import cv2
 
+    from predictivesense.camera._opencv import quiet_opencv_logging
+
+    quiet_opencv_logging()
+
     order: list[tuple[str, int]]
     if backend_hint == "msmf":
         order = [("msmf", cv2.CAP_MSMF)]

@@ -45,14 +45,15 @@ files losslessly.
 
 - `predictivesense/core/enums.py` - `Mode`, `SourceKind` (`SYNTHETIC`/`DEVICE`/`FILE`/`BROWSER` constructible; `WEBRTC` never), `RiskLevel`, `TrackStatus`, and the "constructible source kind" guard.
 - `predictivesense/core/types.py` - all frozen contracts (Block 8). Imports only stdlib, numpy, Pydantic, and `core.enums`. Phase 1 added `SourceInfo`, `ClipManifest`, `IngestHeader`.
-- `predictivesense/config/settings.py` - typed settings, YAML profile loading, strict validation, env overrides (`PS_` prefix, `__` nesting). Phase 1 sections: `capture`, `recorder`, `video`.
+- `predictivesense/config/settings.py` - typed settings, YAML profile loading, strict validation, env overrides (`PS_` prefix, `__` nesting). Phase 1 sections: `capture` (incl. tuning knobs `fourcc`/`buffer_size`/`warmup_frames` - all default to the measured-optimal no-op), `recorder`, `video`.
+- `predictivesense/camera/_opencv.py` - `quiet_opencv_logging()` (idempotent `cv2.setLogLevel(ERROR)` - kills the VIDEOIO index-probe spam) and `fourcc_to_str()`.
 - `predictivesense/camera/source.py` - `FrameSource` interface + `create_frame_source` (builds only `SYNTHETIC`; other kinds raise `NotImplementedError` - built by `pipeline.build_camera_source` / `RecordedDriver`).
 - `predictivesense/camera/synthetic.py` - `SyntheticSource`: deterministic, strictly increasing `frame_id` / `capture_ts`, paced to a target rate.
 - `predictivesense/camera/mailbox.py` - `LatestFrameMailbox`: single-slot, overwrite-on-write, exact `consumed` / `dropped`.
 - `predictivesense/camera/framing.py` - binary ingest message encode/decode (`FramingError`) + clock-offset arithmetic (`ClockOffset`, `clock_offset_seconds`, `capture_ts_seconds`).
 - `predictivesense/camera/enumerate.py` - backend device enumeration (`enumerate_devices`, `as_api_rows`); optional `pygrabber` names, never fatal.
 - `predictivesense/camera/browser.py` - `BrowserSource`: single-slot newest-wins buffer fed by `WS /ws/ingest`; decodes JPEG, stamps `capture_ts` from the clock offset.
-- `predictivesense/camera/device.py` - `DeviceSource`: OpenCV camera, MSMF->DSHOW fallback, bounded exponential-backoff reconnect, reports *achieved* geometry.
+- `predictivesense/camera/device.py` - `DeviceSource`: OpenCV camera, MSMF->DSHOW fallback, reports *achieved* geometry. Reconnect is **non-blocking and `stop()`-interruptible** (one short reopen probe per `read()`, exponential backoff absorbed outside the lock via a `threading.Event`); no thread is added here.
 - `predictivesense/camera/file_source.py` - `FileSource`: sequential decode, pts-based `capture_ts`, `asfast`/`realtime` replay, deterministic `restart()`; `video_duration_s()` helper.
 - `predictivesense/pipeline/loop.py` - `AnalysisLoop` (+ `build_camera_source`, `request_consumer_stall`): producer thread + no-op consumer + lifecycle + error surfacing + Phase 1 metric keys.
 - `predictivesense/pipeline/recorded.py` - `RecordedDriver`: Mode B, no mailbox, every frame, byte-deterministic `results/recorded_<run_id>.jsonl` + manifest.
@@ -114,12 +115,19 @@ speaker) verification - Phase 1 has six developer checks still pending.
 
 ## Current phase status
 
-Phase 1 complete (code + automated tests). Clean venv install, full `pytest -q`
-green (hardware skipped, runnable with `--run-hardware`), 10-minute no-op RSS
-within budget. The API adds `/api/cameras`, `/ws/ingest`, `/api/videos`,
-`/api/analyze`, `/api/record/upload`, `/api/clips`, `/api/debug/stall`,
-`/static/*`. `RecordedDriver` is byte-deterministic. `cv2` is confined to
-`predictivesense/camera/`. See `docs/phase-reports/phase1.md` for measured
-numbers and the six pending physical checks (camera dropdown by name, preview
-smoothness by eye, stall-by-eye, clip on disk, transport benchmarks, phone
-disconnect/recover). Nothing from P2+ has been started.
+Phase 1 complete, including a camera optimization + benchmark pass. `pytest -q`:
+**107 passed, 1 skipped** (hardware; `--run-hardware` to run). 10-minute synthetic
+no-op RSS within budget; `DeviceSource` RSS flat over 30 s of real capture.
+Benchmarked the Integrated Camera (`benchmark_transport.py`): stable 30 fps, 0
+drops, ~15 ms full-pipeline frame age at 480p/720p/1080p on the existing MSMF
+defaults - **no capture default changed** (see `docs/phase-reports/phase1.md`
+§1b). Added opt-in `capture.fourcc`/`buffer_size`/`warmup_frames`, non-blocking
+`DeviceSource` reconnect, OpenCV log suppression, a `frameRate` hint + vanished-
+device fallback in the browser preview. The API adds `/api/cameras`,
+`/ws/ingest`, `/api/videos`, `/api/analyze`, `/api/record/upload`, `/api/clips`,
+`/api/debug/stall`, `/static/*`. `RecordedDriver` is byte-deterministic. `cv2` is
+confined to `predictivesense/camera/`. Developer physically verified both the
+Integrated Camera and the OnePlus virtual camera (browser path) as smooth;
+remaining pending checks: stall-by-eye, clip-on-disk, OnePlus **backend**
+benchmark (device not registered during the pass), mid-run phone disconnect.
+Nothing from P2+ has been started.

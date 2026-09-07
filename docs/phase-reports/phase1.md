@@ -1,7 +1,12 @@
 # Phase 1 — Input Layer — Report
 
-**Date:** 2026-09-07 (UTC)
-**Commit:** measurements were taken against the working tree committed as the Phase 1 commit (parent `9e29492`, "docs: Phase 0 report"). The `pytest -q` and 10-minute no-op numbers below were produced on that tree; this report is committed with it.
+**Date:** 2026-09-07 (UTC). Updated the same day with a **camera optimization
+pass** — §1b and the camera items in §2–§5; the `pytest -q` count rose from 86 to
+107 (21 new camera tests).
+**Commit:** the Phase 1 implementation was commit `1115801` (parent `9e29492`).
+The `pytest -q` and 10-minute no-op numbers in §1 were produced on that tree; the
+§1b camera benchmarks and the reconnect rework are on the optimization-pass
+commit that carries this update.
 **Machine:** `Windows-10-10.0.26200-SP0`, 18 logical CPUs, 16,766,066,688 bytes RAM (~15.6 GiB) — verbatim from the session manifest. Intel Core Ultra 5 125H, integrated Intel Arc GPU, **no NVIDIA GPU, no CUDA**.
 **Python:** 3.11.9, `.venv`, `pip install -e ".[dev,camera]"` (clean; `pip check` → "No broken requirements found").
 
@@ -10,20 +15,20 @@
 ### `python -m pytest -q` — full suite
 
 ```
-s.......................................................................  [ 82%]
-...............                                                           [100%]
+s.......................................................................  [ 66%]
+....................................                                      [100%]
 ============================== warnings summary ===============================
 .venv\Lib\site-packages\starlette\testclient.py:40
   ...: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-86 passed, 1 skipped, 1 warning in 25.22s
+107 passed, 1 skipped, 1 warning in 37.90s
 ```
 
-- **86 passed, 0 failed, 1 skipped, 1 warning, 25.22 s.**
-- The 1 skip is `tests/hardware/test_device_source.py` (needs a camera). `pytest -q -m hardware --run-hardware` collects it (`1/86 tests collected, 85 deselected`); it is not run here because that would be a physical camera check (see §3).
-- `pytest -q -m "not slow"` → **85 passed, 1 skipped, 1 deselected** in ~15 s.
+- **107 passed, 0 failed, 1 skipped, 1 warning, 37.90 s** (86 at the Phase 1 commit + 21 from the camera optimization pass).
+- The 1 skip is `tests/hardware/test_device_source.py` (needs a camera). `pytest -q -m hardware --run-hardware` collects it (`1/107 tests collected, 106 deselected`); it was not run in this pass — the equivalent capture behaviour was exercised against the real Integrated Camera via `benchmark_transport.py` (§1b).
+- `pytest -q -m "not slow"` → **103 passed, 1 skipped, 4 deselected** (the slow ones: `test_noop_run` and the three `test_device_reconnect` timing tests).
 - The lone warning is raised inside `starlette/testclient.py` (a third-party `anyio` alias deprecation), not in `predictivesense/`. Same warning as Phase 0.
-- New test files: `test_framing`, `test_clock_offset`, `test_file_source`, `test_enumerate` (unit); `test_ingest_socket`, `test_recorded_driver`, `test_recorder_upload`, `test_preview_independence` (integration); `test_device_source` (hardware, skipped). `test_no_forbidden_imports` amended (cv2 allowed only under `camera/`, with a self-check). `test_api` gained `test_static_assets_served` and `test_cameras_endpoint_shape`; `test_index_page_served` string assertions updated for the rewritten dashboard.
+- Test files: Phase 1 added `test_framing`, `test_clock_offset`, `test_file_source`, `test_enumerate`, `test_no_forbidden_imports` (amended) (unit); `test_ingest_socket`, `test_recorded_driver`, `test_recorder_upload`, `test_preview_independence` (integration); `test_device_source` (hardware). The optimization pass added `test_device_source` + `test_capture_config` (unit, fake `cv2`) and `test_device_reconnect` (integration/slow, fake `cv2`), plus `tests/fixtures/camfakes.py`.
 
 ### 10-minute no-op run — `python scripts\run_noop.py --profile dev --seconds 600`
 
@@ -68,33 +73,103 @@ With `POST /api/debug/stall {seconds: 3}` holding the analysis **consumer** for 
 - mailbox **drops rise** (`mailbox.dropped > 0`) and mailbox **depth never exceeds 1**;
 - the producer thread stays alive; `loop.error is None`.
 
-### Transport benchmark — `python scripts\benchmark_transport.py --index 97 --seconds 3 --label no-device-probe`
+### Transport benchmark — failure path
 
-Run against a **non-existent** index to exercise the script without touching a
-physical camera. It wrote `results/transport_no-device-probe.json`
+`python scripts\benchmark_transport.py --index 97 --seconds 3 --label no-device-probe`
+against a **non-existent** index wrote `results/transport_no-device-probe.json`
 (`"opened": false`, error recorded) and exited non-zero — the Block 9 "fail
-loudly" path. Real per-transport numbers (laptop cam, OnePlus over Wi-Fi, USB
-webcam) are pending developer runs (see §3).
+loudly" path.
 
 ### Backend camera enumeration
 
 `GET /api/cameras` returns `[{index, name, available, backend}]` for indices
-0–9. `pygrabber==0.2` (+`comtypes`) is installed for DirectShow names; a missing
-or throwing `pygrabber` degrades to `"Camera <index>"` and logs once at INFO
-(`test_enumerate.py`). Not exercised against real hardware here (§3).
+0–9. On this machine it currently returns **`Integrated Camera` (index 0, msmf,
+available)** and `Camera 1..9` unavailable. `pygrabber==0.2` (+`comtypes`)
+supplies the "Integrated Camera" name; a missing/throwing `pygrabber` degrades to
+`"Camera <index>"` and logs once (`test_enumerate.py`). The OpenCV
+`[ WARN ] ... can't be used to capture by index` spam is now suppressed
+(`camera/_opencv.quiet_opencv_logging`).
+
+---
+
+## 1b. Camera optimization pass (measured)
+
+Run: `python scripts\benchmark_transport.py --index 0 --seconds 12 --label <cfg>`
+against the **Integrated Camera**, one row per config. `measured_fps` is
+`frames / elapsed` over the benchmark's own read loop (its ~0.6 fps shortfall vs
+30 is loop overhead, not camera drops — `read_failures = 0`, `reconnects = 0`
+for every row).
+
+| Config | backend / fourcc | achieved | measured fps | read() ms p50 / p95 / min | interval ms p50 / p95 / max | TTFF s | CPU % | RSS Δ (one-time) |
+|---|---|---|---|---|---|---|---|---|
+| 1280×720 auto **(default)** | msmf / raw:22 | 1280×720@30 | 29.39 | 32.1 / 49.8 / 1.7 | 32.1 / 49.8 / 80.9 | 0.031 | 33.6 | +94 MB |
+| 1920×1080 auto | msmf / raw:22 | 1920×1080@30 | 29.39 | 31.9 / 49.4 / 2.3 | 31.9 / 49.4 / 78.2 | 0.016 | 47.6 | +131 MB |
+| 640×480 auto | msmf / raw:22 | 640×480@30 | 29.40 | 32.0 / 49.3 / 1.5 | 32.0 / 49.3 / 78.6 | 0.031 | 10.5 | +74 MB |
+| 1280×720 dshow | dshow / YUY2 | 1280×720@30 | 29.06 | 32.1 / 48.1 / **29.1** | 32.1 / 48.1 / **49.7** | 0.031 | 21.6 | **+25 MB** |
+| 1280×720 fourcc=MJPG | msmf (ignored) | 1280×720@30 | 29.39 | 32.1 / 49.4 / 1.8 | 32.1 / 49.4 / 81.0 | 0.015 | 25.2 | +94 MB |
+
+Full-pipeline check (backend `DeviceSource` → mailbox → analysis loop, 4 s, eval
+profile): MSMF, 1280×720@30, `capture_fps` 29.95, 0 read failures, 0 reconnects,
+snapshot `frame_age_ms` **15 ms**, not stale. `drop_rate` 0.5 is by design — the
+eval consumer samples at 15 Hz and the single-slot mailbox drops the frames it
+does not need.
+
+RSS stability: a 30 s continuous `DeviceSource` read (901 frames) held process
+RSS flat at **144.1 MB (+0.1 MB total)**. The `RSS Δ` column above is the
+**one-time** MSMF/camera-open allocation, not a leak (consistent with Phase 1's
+10-minute synthetic run).
+
+**What this shows / what changed:**
+
+- The Integrated Camera already runs at a **stable 30 fps with zero drops at
+  every resolution up to 1080p** on the existing MSMF-first defaults. FPS and
+  latency do not improve by changing resolution, backend, or FOURCC — only CPU
+  and RAM scale with resolution. **Defaults unchanged: 1280×720 @ 30, backend
+  auto (MSMF first), fourcc auto, buffer_size 1.**
+- **MJPG FOURCC is a no-op** on MSMF (reads back `raw:22`), gives identical
+  timing, and would add JPEG-decode CPU — so `capture.fourcc` defaults to
+  `auto`. A 4-char code is available for a USB webcam that needs it.
+- **DSHOW is measurably the most consistent** on the integrated camera (max
+  interval 50 ms vs MSMF's occasional 80 ms hitch) and uses the least memory
+  (+25 MB), but every `read()` blocks the full ~29 ms frame time and DSHOW is
+  less compatible with UVC / virtual cameras. Kept as a documented alternative
+  (`device_backend: dshow`), not the default.
+- **`DeviceSource` reconnect is now non-blocking and `stop()`-interruptible**
+  (previously `read()` slept and ran a 5 s open-probe while holding the lock, so
+  `stop()` / device-switch could hang and the producer thread stalled). Verified
+  by `tests/integration/test_device_reconnect.py` (fake `cv2.VideoCapture`): a
+  down camera never blocks `read()` for a whole backoff, `stop()` returns in
+  < 1 s mid-reconnect, and the source recovers and resumes when frames return.
+- `benchmark_transport.py` now also reports per-`read()` blocking time, a drop
+  estimate, `reconnect_attempts`, and process CPU% / RSS delta, and takes
+  `--fourcc` / `--buffer-size`.
+- Browser `openStream` now hints `frameRate: 30` and falls back to the default
+  camera (refreshing the device list) if a selected device has vanished.
+- **No new dependency** was added.
 
 ## 2. Physically verified
 
-**Pending developer verification.** Claude Code cannot open a camera, a
-microphone, a speaker, or a browser, and does not claim physical results. The six
-Block 13 checks:
+### Developer's observations (2026-09-07, reported to the implementer)
 
-1. Open the dashboard; confirm the camera dropdown lists the laptop camera and the OnePlus virtual camera **by name**.
-2. Select each in turn; confirm the preview appears and is smooth; wave a hand and judge the lag.
-3. With the preview running, `curl -X POST "http://127.0.0.1:8000/api/debug/stall?seconds=3"` (or use the metrics strip's drop-rate) and confirm **by eye** the preview does not stutter while the drop rate climbs.
+Both camera sources were physically tested through the dashboard:
+
+1. **Integrated Camera** — working correctly, very smooth, very little
+   noticeable latency; currently the better/faster-feeling source.
+2. **OnePlus Nord 4 (Windows Virtual Camera, via Phone Link)** — working
+   correctly through the Windows virtual-camera path; live video stable and
+   usable; only a very small, barely noticeable delay vs the Integrated Camera;
+   no major lag or freezing observed.
+
+These are the developer's by-eye observations, not instrumented measurements.
+They were taken before the optimization pass; the pass changed no capture
+default, so they still describe the shipped behaviour.
+
+### Still pending developer verification (Block 13)
+
+3. With the preview running, `curl -X POST "http://127.0.0.1:8000/api/debug/stall?seconds=3"` and confirm **by eye** the preview does not stutter while the drop rate climbs (the automated half passes — `test_preview_independence.py`).
 4. Record a ~20 s clip with a scenario tag and the consent box ticked; confirm `data/raw/<session>/<clip>.webm` and `<clip>.json` appear with correct metadata.
-5. Run `scripts\benchmark_transport.py --index <N> --seconds 30 --label <transport>` once per transport (laptop cam, `oneplus-wifi`, USB webcam if attached); collect `results/transport_<label>.json` and fill the table in §4.
-6. Disconnect the phone camera mid-run; confirm the UI shows a degraded/stale state and recovers on reconnect (`DeviceSource` reconnect, or the browser stream re-select).
+5. Run `scripts\benchmark_transport.py --index <N> --seconds 20 --label oneplus-wifi` **while Phone Link is streaming** (the virtual camera is not registered otherwise — see §3) and add the row to §1b.
+6. Disconnect the phone camera mid-run; confirm the UI shows a degraded/stale state and recovers on reconnect. Backend `DeviceSource` reconnect is covered by `test_device_reconnect.py`; the browser path re-selects via the device dropdown / `devicechange`.
 
 Run the browser input layer with:
 `python scripts\run_app.py --profile dev --source-kind browser` → http://127.0.0.1:8000/
@@ -104,10 +179,11 @@ For the backend-owned path: set `capture.owner: backend` and
 ## 3. Not verified
 
 - **No detection, pose, tracking, temporal state, risk model, alert policy, voice, or overlay drawing exists.** `Detection`/`Pose`/`Track`/`Relation`/`RiskState`/`Alert` remain contract types only; `StateSnapshot.detections/poses/tracks` are always `[]`, `risk` always `null`. The recorded JSONL carries empty `detections/poses/tracks` by design.
-- **No real camera has been opened by this session.** `DeviceSource`, the MSMF→DSHOW fallback, reconnect behaviour, `/api/cameras` against real devices, and `tests/hardware/test_device_source.py` are all unrun. The benchmark was run only against a bogus index to prove the failure path.
-- **No browser has run the dashboard.** `getUserMedia`, `enumerateDevices` labels, `requestVideoFrameCallback` preview FPS, `MediaStreamTrackProcessor` vs the `OffscreenCanvas` fallback, `MediaRecorder`, and the by-eye preview-smoothness / stall checks are all the developer's.
-- **Clock-offset RTT is ~0 in-process.** The frame-age numbers above are from a loopback test in one process; a real browser↔backend RTT (Wi-Fi especially) will be larger and is the actual error bar on `frame_age_ms`.
-- **Transport comparison table is empty** until the developer runs `benchmark_transport.py` per transport.
+- **OnePlus virtual camera: backend `DeviceSource` path is NOT measured.** During this pass the Phone Link virtual camera was **not registered with the OS** (`/api/cameras` and a 0–9 MSMF+DSHOW sweep saw only the Integrated Camera). The OnePlus was verified by the developer only through the **browser** path (`getUserMedia` + the dashboard). Whether `DeviceSource` (owner=backend) opens it reliably, its achieved FPS/latency, and its reconnect behaviour on a mid-run Phone Link drop are all unverified. The non-blocking-reconnect and `buffer_size`/`warmup_frames` knobs are aimed at making that path robust *if used*, but this is a limitation of the Phone Link / Windows-virtual-camera integration, not something PredictiveSense can measure without the device present. Command for the developer: `benchmark_transport.py --index <N> --seconds 20 --label oneplus-wifi` while streaming.
+- **Real end-to-end camera latency is not measured.** `frame_age_ms` (15 ms full-pipeline) is the consumer-processing lag only; sensor→`cap.read()` and `<video>` render latency need an external timing reference (photodiode / high-speed capture) that is not available here.
+- **No browser has run the dashboard in this session.** `getUserMedia`, `enumerateDevices` labels, `requestVideoFrameCallback` preview FPS, `MediaStreamTrackProcessor` vs the `OffscreenCanvas` fallback, `MediaRecorder`, `frameRate` negotiation, and the by-eye preview-smoothness / stall checks are the developer's (items 1–2 in §2 are now reported).
+- **Clock-offset RTT is ~0 in-process.** The ingest frame-age numbers are from a loopback test in one process; a real browser↔backend RTT (Wi-Fi especially) will be larger and is the actual error bar on `frame_age_ms`.
+- **`tests/hardware/test_device_source.py` is skipped by default** (`--run-hardware` runs it). It was not run in this pass; the equivalent capture behaviour was exercised by `benchmark_transport.py` against the real Integrated Camera instead (§1b).
 - The 10-minute RSS figure is a single `dev`-profile synthetic run on this one machine; it is a measurement of this skeleton, not a benchmark, and no target was set.
 
 ## 4. Deviations and decisions
@@ -126,9 +202,17 @@ Recorded in full in `docs/decisions.md` (Phase 1 section). The load-bearing ones
 - **`requirements.lock.txt`** regenerated with `pip freeze --exclude-editable`, written UTF-8 **without BOM** via .NET (`Out-File -Encoding utf8NoBOM` does not exist in Windows PowerShell 5.1). New pins: `opencv-python==4.10.0.84`, `python-multipart==0.0.20`, `pygrabber==0.2`, `comtypes==1.4.16`. `opencv-python` resolves cleanly against the pinned `numpy==2.2.1`.
 - **`opencv-python` version:** 4.10.0.84 (latest cp37-abi3 wheel that installed cleanly alongside `numpy==2.2.1`). Bundled FFmpeg/MSMF, prebuilt wheel, no runtime download, no CUDA.
 
+### Camera optimization pass (see `docs/decisions.md` → "Phase 1 camera optimization pass")
+
+- Capture defaults **unchanged** — measured optimal for the Integrated Camera. Added opt-in knobs `capture.fourcc` (default `auto`), `capture.buffer_size` (default `1`), `capture.warmup_frames` (default `0`).
+- `DeviceSource` reconnect reworked to non-blocking + `stop()`-interruptible (fixed a real hang / producer-stall bug). No thread added to `camera/`.
+- OpenCV VIDEOIO log spam suppressed; `benchmark_transport.py` extended (read()-blocking time, CPU/RSS, drop estimate, `--fourcc`/`--buffer-size`); browser `openStream` gains a `frameRate` hint + vanished-device fallback.
+
 ## 5. Open questions for the developer
 
 - Confirm `opencv-python==4.10.0.84` is acceptable, or name a version to pin instead (4.11.x is available; 4.10 was chosen for a clean resolve against `numpy==2.2.1`).
+- For **latency-sensitive backend-owned** use on the Integrated Camera, `device_backend: dshow` measured as the most *consistent* (max frame interval 50 ms vs MSMF's 80 ms) with the lowest memory, at the cost of a blocking `read()`. Default stays `auto` (MSMF-first) for virtual-camera compatibility — say if you'd rather default to DSHOW for the eval/backend profile.
+- The OnePlus backend `DeviceSource` path is unmeasured (device not registered during this pass). If backend-owned virtual-camera capture matters, run the benchmark while Phone Link streams and confirm reconnect on a mid-run drop.
 - The dashboard's analysis fallback path (`no MediaStreamTrackProcessor`) samples the `<video>` element with `createImageBitmap` on the main thread for **analysis only** (Requirement 7's stated fallback). Confirm this is acceptable, or restrict the fallback further.
 - `capture.owner` cannot be *proven* mutually exclusive server-side (the backend simply never opens a device when `owner=browser`, and `/ws/ingest` refuses connections when `owner=backend`). Confirm the by-construction enforcement is sufficient.
 - The stray untracked `phase0.md` at the repo root (a duplicate of `docs/phase-reports/phase0.md`) was removed for a clean tree. Say if it should have been kept.

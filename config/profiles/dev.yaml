@@ -40,6 +40,13 @@ capture:
   request_width: 1280
   request_height: 720
   request_fps: 30
+  # Measured on the integrated camera: MSMF negotiates its own format at a full
+  # 30 fps up to 1080p with zero drops; forcing MJPG gave no gain and adds JPEG
+  # decode. Leave fourcc auto. buffer_size 1 = newest-frame-only (no-op on MSMF,
+  # helps DSHOW / virtual-camera latency).
+  fourcc: auto
+  buffer_size: 1
+  warmup_frames: 0
   open_timeout_s: 5.0
   reconnect_initial_s: 0.5
   reconnect_max_s: 8.0

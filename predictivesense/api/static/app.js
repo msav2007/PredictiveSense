@@ -117,24 +117,40 @@ async function populateDevices() {
 
 async function openStream(deviceId) {
   if (state.stream) state.stream.getTracks().forEach((t) => t.stop());
-  const constraints = {
-    video: deviceId
-      ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-      : { width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: false,
+
+  const ideal = {
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30 },
   };
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: deviceId ? { deviceId: { exact: deviceId }, ...ideal } : ideal,
+      audio: false,
+    });
   } catch (err) {
-    setNote(`getUserMedia failed: ${err.name}`);
-    return;
+    // A vanished / busy device: fall back to the default camera and refresh
+    // the list so selection recovers instead of dead-ending the preview.
+    setNote(`getUserMedia(${deviceId ? "selected" : "default"}) failed: ${err.name}; trying default`);
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: ideal, audio: false });
+    } catch (err2) {
+      setNote(`no camera available: ${err2.name}`);
+      populateDevices();
+      return;
+    }
   }
   state.stream = stream;
 
   const video = $("preview");
   video.srcObject = stream;          // the only thing we ever do with <video>
   measurePreviewFps(video);
+  populateDevices();                 // labels are only populated once a stream is live
+
+  const track = stream.getVideoTracks()[0];
+  const s = track ? track.getSettings() : {};
+  setNote(`preview: ${s.width || "?"}x${s.height || "?"} @ ${Math.round(s.frameRate || 0)} fps`);
 
   $("record-btn").disabled = false;
   startAnalysisWorker(stream);
