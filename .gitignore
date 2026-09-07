@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches / build
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.pytest_tmp/
+.mypy_cache/
+.ruff_cache/
+
+# Run artifacts - keep the directories, ignore their contents
+data/*
+!data/.gitkeep
+results/*
+!results/.gitkeep
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~

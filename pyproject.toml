@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "predictivesense"
+version = "0.1.0"
+description = "PredictiveSense research prototype - Phase 0 foundation (contracts, config, synthetic source, mailbox, no-op loop, API, telemetry)"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "Proprietary - research prototype" }
+
+# Runtime dependencies. Pinned exactly. Every entry is justified in docs/attribution.md.
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.32.1",
+    "pydantic==2.10.4",
+    "pydantic-settings==2.6.1",
+    "PyYAML==6.0.2",
+    "numpy==2.2.1",
+    "psutil==6.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "httpx==0.28.1",
+]
+
+[tool.setuptools.packages.find]
+include = ["predictivesense*"]
+
+[tool.setuptools.package-data]
+"predictivesense.api.static" = ["*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Project-local basetemp: the shared system temp dir is not reliably writable
+# in this sandboxed environment.
+addopts = "--import-mode=importlib --basetemp=.pytest_tmp"
+markers = [
+    "unit: fast, isolated, no threads or I/O",
+    "integration: multiple components wired together",
+    "slow: runs for several seconds or more",
+    "hardware: requires a physical device (empty in Phase 0)",
+]
