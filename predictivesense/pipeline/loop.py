@@ -191,7 +191,10 @@ class AnalysisLoop:
     # -- one iteration --------------------------------------------
 
     def _iterate(self) -> None:
-        t0 = time.monotonic()
+        # perf_counter (monotonic, ~100 ns) times the iteration; monotonic's
+        # 15.6 ms tick on this Windows build cannot resolve it. time.time is
+        # never used for any duration.
+        t0 = time.perf_counter()
 
         frame = self._mailbox.get()
         stats = self._mailbox.stats()
@@ -213,7 +216,7 @@ class AnalysisLoop:
             (emitted_ts - capture_ts) * 1000.0 if capture_ts is not None else None
         )
 
-        iter_latency_ms = (time.monotonic() - t0) * 1000.0
+        iter_latency_ms = (time.perf_counter() - t0) * 1000.0
         self._last_iter_ms = iter_latency_ms
         self.metrics.samples("iter_latency_ms").add(iter_latency_ms)
 

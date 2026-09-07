@@ -133,9 +133,14 @@ class Samples:
 
 
 class Timer:
-    """Context manager measuring elapsed duration with ``time.monotonic``.
+    """Context manager measuring a short elapsed duration.
 
-    Optionally records the elapsed milliseconds into a :class:`Samples` on exit.
+    Uses ``time.perf_counter`` - a monotonic clock (``time.get_clock_info``
+    reports ``monotonic=True``) whose ~100 ns resolution can actually resolve a
+    sub-millisecond loop iteration. ``time.monotonic`` on this Windows build is
+    ``GetTickCount64`` at 15.6 ms and would report every iteration as 0 ms.
+    ``time.time`` is never used. Optionally records the elapsed milliseconds
+    into a :class:`Samples` on exit.
     """
 
     def __init__(self, sink: Samples | None = None) -> None:
@@ -144,11 +149,11 @@ class Timer:
         self.elapsed_ms = 0.0
 
     def __enter__(self) -> "Timer":
-        self._start = time.monotonic()
+        self._start = time.perf_counter()
         return self
 
     def __exit__(self, *_exc: object) -> None:
-        self.elapsed_ms = (time.monotonic() - self._start) * 1000.0
+        self.elapsed_ms = (time.perf_counter() - self._start) * 1000.0
         if self._sink is not None:
             self._sink.add(self.elapsed_ms)
 
