@@ -15,7 +15,34 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from predictivesense.config.settings import AppConfig, default_profiles_dir, load_config
+from predictivesense.core.enums import SourceKind
 from predictivesense.core.types import Frame
+from tests.fixtures.make_fixture_video import FIXTURE_NAME, SPEC, make_fixture_video
+
+_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+# -- hardware marker gate -------------------------------------------------
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-hardware",
+        action="store_true",
+        default=False,
+        help="run tests marked `hardware` (needs a physical camera attached)",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--run-hardware"):
+        return
+    skip = pytest.mark.skip(reason="needs a camera; pass --run-hardware to run")
+    for item in items:
+        if "hardware" in item.keywords:
+            item.add_marker(skip)
 
 _VALID_PROFILE = """\
 mode: realtime
@@ -62,6 +89,51 @@ def dev_config() -> AppConfig:
 @pytest.fixture()
 def eval_config() -> AppConfig:
     return load_config("eval")
+
+
+@pytest.fixture()
+def browser_config() -> AppConfig:
+    """``dev`` profile with the browser ingest source (capture.owner stays browser)."""
+
+    cfg = load_config("dev")
+    return cfg.model_copy(
+        update={"source": cfg.source.model_copy(update={"kind": SourceKind.BROWSER})}
+    )
+
+
+@pytest.fixture(scope="session")
+def fixture_video() -> Path:
+    """Path to the deterministic test clip, regenerated if missing."""
+
+    dest = _FIXTURE_DIR / FIXTURE_NAME
+    if not dest.is_file() or dest.stat().st_size == 0:
+        make_fixture_video(dest)
+    return dest
+
+
+@pytest.fixture(scope="session")
+def fixture_video_frames(fixture_video: Path) -> int:
+    """The number of frames OpenCV actually decodes from the fixture clip."""
+
+    import cv2
+
+    cap = cv2.VideoCapture(str(fixture_video))
+    try:
+        count = 0
+        while True:
+            ok, _ = cap.read()
+            if not ok:
+                break
+            count += 1
+    finally:
+        cap.release()
+    assert count > 0, "fixture clip decoded zero frames"
+    return count
+
+
+@pytest.fixture(scope="session")
+def fixture_video_spec():
+    return SPEC
 
 
 @pytest.fixture()

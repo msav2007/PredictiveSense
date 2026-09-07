@@ -3,30 +3,71 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PredictiveSense - state snapshot</title>
+  <title>PredictiveSense - input layer</title>
+  <link rel="stylesheet" href="/static/app.css" />
 </head>
 <body>
-  <h1>PredictiveSense - state snapshot</h1>
-  <p>status: <span id="status">connecting...</span></p>
-  <pre id="snapshot">(waiting for first snapshot)</pre>
-  <script>
-    (function () {
-      var statusEl = document.getElementById("status");
-      var snapshotEl = document.getElementById("snapshot");
-      var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      var url = proto + "//" + window.location.host + "/ws/state";
-      var ws = new WebSocket(url);
-      ws.onopen = function () { statusEl.textContent = "connected"; };
-      ws.onclose = function () { statusEl.textContent = "disconnected"; };
-      ws.onerror = function () { statusEl.textContent = "error"; };
-      ws.onmessage = function (event) {
-        try {
-          snapshotEl.textContent = JSON.stringify(JSON.parse(event.data), null, 2);
-        } catch (e) {
-          snapshotEl.textContent = event.data;
-        }
-      };
-    })();
-  </script>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="ws-dot" title="state socket"></span>
+      PredictiveSense <span class="phase">input layer</span>
+    </div>
+    <div class="owner" id="owner-badge">owner: &hellip;</div>
+  </header>
+
+  <main>
+    <section class="panel preview" aria-labelledby="preview-h">
+      <h2 id="preview-h">Preview <span class="hint">native srcObject &mdash; never polled, never drawn for display</span></h2>
+      <div class="video-wrap">
+        <video id="preview" autoplay muted playsinline></video>
+        <div class="unavailable" id="preview-unavailable" hidden>preview unavailable &mdash; backend owns the camera</div>
+        <div class="rec-badge" id="rec-badge" hidden><span class="rec-dot"></span> REC <span id="rec-elapsed">0:00</span></div>
+      </div>
+      <div class="controls">
+        <label>Camera
+          <select id="device-select"><option value="">&mdash;</option></select>
+        </label>
+        <button id="record-btn" disabled>Record clip</button>
+      </div>
+    </section>
+
+    <section class="panel metrics" aria-labelledby="metrics-h">
+      <h2 id="metrics-h">Metrics</h2>
+      <dl class="metric-grid" id="metric-grid">
+        <div><dt>preview fps</dt><dd id="m-preview_fps">&mdash;</dd></div>
+        <div><dt>capture fps</dt><dd id="m-capture_fps">&mdash;</dd></div>
+        <div><dt>analysis fps</dt><dd id="m-analysis_fps">&mdash;</dd></div>
+        <div><dt>dropped analysis</dt><dd id="m-dropped_analysis_frames">&mdash;</dd></div>
+        <div><dt>drop rate</dt><dd id="m-drop_rate">&mdash;</dd></div>
+        <div><dt>mailbox depth</dt><dd id="m-mailbox_depth">&mdash;</dd></div>
+        <div><dt>frame age ms</dt><dd id="m-frame_age_ms">&mdash;</dd></div>
+        <div><dt>decode ms</dt><dd id="m-decode_ms">&mdash;</dd></div>
+        <div><dt>ingest B/s</dt><dd id="m-ingest_bytes_per_s">&mdash;</dd></div>
+        <div><dt>reconnects</dt><dd id="m-reconnects">&mdash;</dd></div>
+        <div><dt>clock rtt ms</dt><dd id="m-clock_offset_rtt_ms">&mdash;</dd></div>
+        <div><dt>stale</dt><dd id="m-stale">&mdash;</dd></div>
+      </dl>
+      <p class="note" id="ingest-note">analysis worker: idle</p>
+    </section>
+
+    <section class="panel record-meta" aria-labelledby="rec-h">
+      <h2 id="rec-h">Clip metadata</h2>
+      <label>Scenario tag <input id="scenario-tag" type="text" value="cabin-unlabelled" /></label>
+      <label>Notes <input id="clip-notes" type="text" placeholder="optional" /></label>
+      <label class="consent"><input id="consent-ack" type="checkbox" /> Consent acknowledged for everyone on camera</label>
+      <ul class="clip-list" id="clip-list"></ul>
+    </section>
+
+    <section class="panel videos" aria-labelledby="videos-h">
+      <h2 id="videos-h">Recorded video (Mode B)</h2>
+      <label>Replay
+        <select id="replay-mode"><option value="asfast">asfast</option><option value="realtime">realtime</option></select>
+      </label>
+      <ul class="video-list" id="video-list"></ul>
+      <pre class="analyze-out" id="analyze-out" hidden></pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js" type="module"></script>
 </body>
 </html>

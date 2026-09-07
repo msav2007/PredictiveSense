@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "predictivesense"
 version = "0.1.0"
-description = "PredictiveSense research prototype - Phase 0 foundation (contracts, config, synthetic source, mailbox, no-op loop, API, telemetry)"
+description = "PredictiveSense research prototype - Phase 1 input layer (camera enumeration/ownership, browser-worker ingest, backend device + recorded-video sources, raw clip recorder, transport metrics)"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { text = "Proprietary - research prototype" }
@@ -19,6 +19,8 @@ dependencies = [
     "PyYAML==6.0.2",
     "numpy==2.2.1",
     "psutil==6.1.1",
+    "opencv-python==4.10.0.84",
+    "python-multipart==0.0.20",
 ]
 
 [project.optional-dependencies]
@@ -26,12 +28,18 @@ dev = [
     "pytest==8.3.4",
     "httpx==0.28.1",
 ]
+# Windows-only: human-readable DirectShow camera names for backend enumeration.
+# Never imported at import time; a missing or throwing pygrabber degrades to
+# "Camera <index>" and logs once. See predictivesense/camera/enumerate.py.
+camera = [
+    "pygrabber==0.2",
+]
 
 [tool.setuptools.packages.find]
 include = ["predictivesense*"]
 
 [tool.setuptools.package-data]
-"predictivesense.api.static" = ["*.html"]
+"predictivesense.api.static" = ["*.html", "*.js", "*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -42,5 +50,5 @@ markers = [
     "unit: fast, isolated, no threads or I/O",
     "integration: multiple components wired together",
     "slow: runs for several seconds or more",
-    "hardware: requires a physical device (empty in Phase 0)",
+    "hardware: requires a physical camera; skipped unless --run-hardware is passed",
 ]

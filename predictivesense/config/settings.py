@@ -7,7 +7,7 @@ clear error. Nothing here falls back silently to a default.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,6 +25,9 @@ __all__ = [
     "BroadcastConfig",
     "ApiConfig",
     "NoopConfig",
+    "CaptureConfig",
+    "RecorderConfig",
+    "VideoConfig",
     "available_profiles",
     "load_config",
     "default_profiles_dir",
@@ -90,6 +93,40 @@ class NoopConfig(_Section):
     max_rss_growth_mb: float = Field(gt=0, default=25.0)
 
 
+class CaptureConfig(_Section):
+    """Camera ownership and the browser-worker / backend-device capture path."""
+
+    owner: Literal["browser", "backend"] = "browser"
+    device_index: int = Field(ge=0, default=0)
+    device_backend: Literal["auto", "msmf", "dshow"] = "auto"
+    request_width: int = Field(gt=0, default=1280)
+    request_height: int = Field(gt=0, default=720)
+    request_fps: float = Field(gt=0, default=30.0)
+    open_timeout_s: float = Field(gt=0, default=5.0)
+    reconnect_initial_s: float = Field(gt=0, default=0.5)
+    reconnect_max_s: float = Field(gt=0, default=8.0)
+    analysis_fps: float = Field(gt=0, default=10.0)
+    analysis_width: int = Field(gt=0, default=640)
+    analysis_height: int = Field(gt=0, default=480)
+    analysis_jpeg_quality: float = Field(gt=0.0, le=1.0, default=0.7)
+    max_ingest_message_bytes: int = Field(gt=0, default=2_000_000)
+
+
+class RecorderConfig(_Section):
+    """Raw full-quality clip recorder (browser MediaRecorder -> disk + manifest)."""
+
+    enabled: bool = True
+    max_clip_mb: float = Field(gt=0, default=500.0)
+    output_dir: Path = Field(default=Path("data/raw"))
+
+
+class VideoConfig(_Section):
+    """Mode B: recorded video files analysed retrospectively by RecordedDriver."""
+
+    input_dir: Path = Field(default=Path("data/videos"))
+    replay_mode: Literal["realtime", "asfast"] = "asfast"
+
+
 class AppConfig(BaseSettings):
     """The fully resolved configuration for one run.
 
@@ -113,6 +150,9 @@ class AppConfig(BaseSettings):
     broadcast: BroadcastConfig
     api: ApiConfig = Field(default_factory=ApiConfig)
     noop: NoopConfig = Field(default_factory=NoopConfig)
+    capture: CaptureConfig = Field(default_factory=CaptureConfig)
+    recorder: RecorderConfig = Field(default_factory=RecorderConfig)
+    video: VideoConfig = Field(default_factory=VideoConfig)
 
     def as_json_dict(self) -> dict[str, Any]:
         """Resolved config as a JSON-serialisable dict (for the manifest and API)."""

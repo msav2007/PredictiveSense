@@ -18,15 +18,17 @@ from typing import Any
 
 from predictivesense.camera.mailbox import LatestFrameMailbox
 from predictivesense.camera.source import FrameSource, create_frame_source
-from predictivesense.config.settings import AppConfig
+from predictivesense.config.settings import AppConfig, ConfigError
+from predictivesense.core.enums import SourceKind
 from predictivesense.core.types import StateSnapshot
 from predictivesense.logging_setup import get_logger
 from predictivesense.telemetry.metrics import MetricRegistry
 
-__all__ = ["AnalysisLoop", "build_loop"]
+__all__ = ["AnalysisLoop", "build_loop", "build_camera_source"]
 
 _LOG = get_logger(__name__)
 _JOIN_TIMEOUT_S = 5.0
+_MAX_STALL_S = 10.0  # debug consumer stall ceiling (preview-independence check)
 SnapshotListener = Callable[[StateSnapshot], None]
 
 
@@ -61,6 +63,7 @@ class AnalysisLoop:
         self._last_frame_mono: float | None = None
         self._last_iter_ms = 0.0
         self._max_mailbox_depth = 0
+        self._stall_until = 0.0  # time.monotonic() deadline; 0 = not stalled
         self.error: BaseException | None = None
 
     # -- wiring --------------------------------------------------------
@@ -75,6 +78,33 @@ class AnalysisLoop:
     @property
     def max_mailbox_depth(self) -> int:
         return self._max_mailbox_depth
+
+    @property
+    def source(self) -> FrameSource:
+        return self._source
+
+    @property
+    def mailbox(self) -> LatestFrameMailbox:
+        return self._mailbox
+
+    def threads_alive(self) -> dict[str, bool]:
+        return {
+            "producer": bool(self._producer and self._producer.is_alive()),
+            "consumer": bool(self._consumer and self._consumer.is_alive()),
+        }
+
+    def request_consumer_stall(self, seconds: float) -> float:
+        """Artificially stall the consumer for up to 10 s (preview-independence).
+
+        Documented hook for Block 13 check 3: the producer, the ingest socket
+        and the browser preview keep running while the consumer pauses; mailbox
+        drops climb and depth stays <= 1. Returns the clamped seconds applied.
+        """
+
+        applied = max(0.0, min(float(seconds), _MAX_STALL_S))
+        self._stall_until = time.monotonic() + applied
+        _LOG.warning("consumer stall requested: %.2fs (debug / preview-independence)", applied)
+        return applied
 
     # -- lifecycle ---------------------------------------------------
 
@@ -178,6 +208,12 @@ class AnalysisLoop:
         try:
             while not self._stop_evt.is_set():
                 now = time.monotonic()
+                if now < self._stall_until:
+                    # Debug stall: do not consume. The producer + ingest socket
+                    # keep running; the mailbox fills and drops, depth stays <=1.
+                    self._stop_evt.wait(min(self._stall_until - now, 0.2))
+                    next_due = time.monotonic()
+                    continue
                 if now < next_due:
                     self._stop_evt.wait(next_due - now)
                     continue
@@ -220,6 +256,25 @@ class AnalysisLoop:
         self._last_iter_ms = iter_latency_ms
         self.metrics.samples("iter_latency_ms").add(iter_latency_ms)
 
+        loop_hz = self.metrics.rate("loop").hz(now=now)
+        producer_hz = self.metrics.rate("producer").hz(now=now)
+        total_seen = stats.consumed + stats.dropped
+        metrics: dict[str, float] = {
+            "loop_rate_hz": loop_hz,
+            "producer_rate_hz": producer_hz,
+            "consumed": float(stats.consumed),
+            "dropped": float(stats.dropped),
+            "mailbox_depth": float(stats.depth),
+            "iter_latency_ms": iter_latency_ms,
+            # Phase 1 keys (additive; no reshape).
+            "capture_fps": producer_hz,
+            "analysis_fps": loop_hz,
+            "dropped_analysis_frames": float(stats.dropped),
+            "drop_rate": (stats.dropped / total_seen) if total_seen else 0.0,
+            "frame_age_ms": frame_age_ms if frame_age_ms is not None else -1.0,
+        }
+        self._merge_source_metrics(metrics)
+
         self._snapshot_id += 1
         snapshot = StateSnapshot(
             snapshot_id=self._snapshot_id,
@@ -232,18 +287,38 @@ class AnalysisLoop:
             poses=[],
             tracks=[],
             risk=None,
-            metrics={
-                "loop_rate_hz": self.metrics.rate("loop").hz(now=now),
-                "producer_rate_hz": self.metrics.rate("producer").hz(now=now),
-                "consumed": float(stats.consumed),
-                "dropped": float(stats.dropped),
-                "mailbox_depth": float(stats.depth),
-                "iter_latency_ms": iter_latency_ms,
-            },
+            metrics=metrics,
             stale=stale,
         )
         self._latest = snapshot
         self._emit(snapshot)
+
+    def _merge_source_metrics(self, metrics: dict[str, float]) -> None:
+        """Fold source-specific counters into the snapshot metrics. Never raises.
+
+        Only cheap last-value / counter reads - no percentile work on this hot
+        path (Block 3.8 / Requirement 23).
+        """
+
+        try:
+            info = self._source.info()
+        except Exception as exc:  # noqa: BLE001 - a bad source must not kill the loop
+            _LOG.debug("source.info() failed on hot path: %r", exc)
+            return
+        mapping = {
+            "decode_ms": "decode_ms_last",
+            "ingest_bytes_per_s": "ingest_bytes_per_s",
+            "reconnects": "reconnects",
+            "clock_offset_rtt_ms": "clock_offset_rtt_ms",
+        }
+        for out_key, in_key in mapping.items():
+            value = info.get(in_key)
+            if isinstance(value, (int, float)):
+                metrics[out_key] = float(value)
+        # Count this source's own newest-wins drops toward the analysis-drop total.
+        buffer_dropped = info.get("buffer_dropped")
+        if isinstance(buffer_dropped, (int, float)):
+            metrics["dropped_analysis_frames"] += float(buffer_dropped)
 
     def _emit(self, snapshot: StateSnapshot) -> None:
         for listener in self._listeners:
@@ -280,11 +355,68 @@ class AnalysisLoop:
         }
 
 
+def build_camera_source(config: AppConfig) -> FrameSource:
+    """Construct the live frame source for ``config.source.kind``.
+
+    ``SYNTHETIC`` -> the Phase 0 synthetic source (used by ``run_noop`` and the
+    Phase 0 tests). ``BROWSER`` -> a :class:`BrowserSource` fed by the ingest
+    socket (requires ``capture.owner == "browser"``). ``DEVICE`` -> a
+    backend-owned :class:`DeviceSource` (requires ``capture.owner == "backend"``).
+    ``FILE`` is rejected here - recorded video runs through ``RecordedDriver``,
+    not the live loop.
+    """
+
+    kind = SourceKind(config.source.kind)
+    if kind is SourceKind.SYNTHETIC:
+        return create_frame_source(config.source)
+
+    if kind is SourceKind.BROWSER:
+        if config.capture.owner != "browser":
+            raise ConfigError(
+                "source.kind=browser requires capture.owner=browser "
+                f"(got {config.capture.owner!r})"
+            )
+        from predictivesense.camera.browser import BrowserSource
+
+        return BrowserSource(
+            analysis_width=config.capture.analysis_width,
+            analysis_height=config.capture.analysis_height,
+        )
+
+    if kind is SourceKind.DEVICE:
+        if config.capture.owner != "backend":
+            raise ConfigError(
+                "source.kind=device requires capture.owner=backend "
+                f"(got {config.capture.owner!r})"
+            )
+        from predictivesense.camera.device import DeviceSource
+
+        return DeviceSource(
+            config.capture.device_index,
+            backend=config.capture.device_backend,
+            request_width=config.capture.request_width,
+            request_height=config.capture.request_height,
+            request_fps=config.capture.request_fps,
+            open_timeout_s=config.capture.open_timeout_s,
+            reconnect_initial_s=config.capture.reconnect_initial_s,
+            reconnect_max_s=config.capture.reconnect_max_s,
+        )
+
+    if kind is SourceKind.FILE:
+        raise ConfigError(
+            "source.kind=file has no live loop; analyse recorded video with "
+            "RecordedDriver (scripts/run_recorded.py or POST /api/analyze)."
+        )
+
+    # WEBRTC and any future kind.
+    return create_frame_source(config.source)
+
+
 def build_loop(
     config: AppConfig, *, registry: MetricRegistry | None = None
 ) -> AnalysisLoop:
     """Construct a loop with the frame source described by ``config``."""
 
-    source = create_frame_source(config.source)
+    source = build_camera_source(config)
     mailbox = LatestFrameMailbox()
     return AnalysisLoop(config, source, mailbox, registry=registry)

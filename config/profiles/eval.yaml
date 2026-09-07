@@ -28,3 +28,30 @@ noop:
   default_seconds: 60
   csv_sample_period_s: 1.0
   max_rss_growth_mb: 25.0
+
+# Phase 1: tuned for deterministic offline (Mode B) runs. `asfast` replay, no
+# pacing; RecordedDriver output is byte-identical across runs for one file.
+capture:
+  owner: backend
+  device_index: 0
+  device_backend: auto
+  request_width: 1280
+  request_height: 720
+  request_fps: 30
+  open_timeout_s: 5.0
+  reconnect_initial_s: 0.5
+  reconnect_max_s: 8.0
+  analysis_fps: 10
+  analysis_width: 640
+  analysis_height: 480
+  analysis_jpeg_quality: 0.7
+  max_ingest_message_bytes: 2000000
+
+recorder:
+  enabled: false
+  max_clip_mb: 500
+  output_dir: data/raw
+
+video:
+  input_dir: data/videos
+  replay_mode: asfast

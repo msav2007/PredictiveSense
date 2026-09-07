@@ -15,11 +15,20 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
-# Run artifacts - keep the directories, ignore their contents
-data/*
+# Run artifacts - keep the directory skeleton, ignore all contents
+data/**
 !data/.gitkeep
+!data/videos/
+!data/videos/.gitkeep
+!data/raw/
+!data/raw/.gitkeep
 results/*
 !results/.gitkeep
+
+# Generated test fixtures (regenerated on demand by tests/fixtures/make_fixture_video.py)
+tests/fixtures/*.avi
+tests/fixtures/*.mp4
+tests/fixtures/*.mkv
 
 # IDE / editor
 .idea/

@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from predictivesense.core.enums import SourceKind, ensure_source_constructible
+from predictivesense.core.enums import SourceKind
 from predictivesense.core.types import Frame
 
 __all__ = ["FrameSource", "create_frame_source"]
@@ -48,14 +48,23 @@ class FrameSource(ABC):
 
 
 def create_frame_source(source_config: Any) -> FrameSource:
-    """Build the frame source described by ``source_config``.
+    """Build a :class:`SyntheticSource` from a bare :class:`SourceConfig`.
 
-    Raises :class:`NotImplementedError` (naming the owning phase) for any
-    :class:`SourceKind` other than ``SYNTHETIC``.
+    This minimal factory only handles ``SYNTHETIC``. ``DEVICE`` / ``FILE`` /
+    ``BROWSER`` need parameters that ``SourceConfig`` does not carry (a device
+    index and backend, a file path, ingest dimensions); those are constructed by
+    :func:`predictivesense.pipeline.loop.build_loop` and
+    :class:`predictivesense.pipeline.recorded.RecordedDriver` from the full
+    ``AppConfig``. ``WEBRTC`` is never constructible.
     """
 
     kind = SourceKind(source_config.kind)
-    ensure_source_constructible(kind)
+    if kind is not SourceKind.SYNTHETIC:
+        raise NotImplementedError(
+            f"create_frame_source builds only SYNTHETIC from a SourceConfig; "
+            f"{kind.name} is built by pipeline.build_loop / RecordedDriver from "
+            f"the full AppConfig (WEBRTC is never constructible)."
+        )
 
     # Imported here to keep the interface module free of concrete dependencies.
     from predictivesense.camera.synthetic import SyntheticSource

@@ -1,6 +1,8 @@
 """Enumerations shared across the pipeline.
 
-Only :class:`Mode` and :data:`SourceKind.SYNTHETIC` carry behaviour in Phase 0.
+Phase 1 makes :data:`SourceKind.DEVICE`, ``FILE`` and ``BROWSER`` constructible
+alongside ``SYNTHETIC``. ``WEBRTC`` stays defined but never constructible - the
+browser-worker ingest path replaces it (see ``docs/decisions.md``).
 :class:`RiskLevel` and :class:`TrackStatus` are defined but unused; later phases
 consume them without reshaping this module.
 """
@@ -27,11 +29,17 @@ class Mode(str, Enum):
 
 
 class SourceKind(str, Enum):
-    """Kind of frame source. Only ``SYNTHETIC`` is constructible in Phase 0."""
+    """Kind of frame source.
+
+    ``SYNTHETIC``, ``DEVICE``, ``FILE`` and ``BROWSER`` are constructible from
+    Phase 1 on. ``WEBRTC`` is retained for wire-format stability only and is
+    never constructible.
+    """
 
     SYNTHETIC = "synthetic"
     DEVICE = "device"
     FILE = "file"
+    BROWSER = "browser"
     WEBRTC = "webrtc"
 
 
@@ -54,13 +62,21 @@ class TrackStatus(str, Enum):
 
 
 # Which SourceKind values a driver may actually build in this phase.
-_CONSTRUCTIBLE: frozenset[SourceKind] = frozenset({SourceKind.SYNTHETIC})
+_CONSTRUCTIBLE: frozenset[SourceKind] = frozenset(
+    {
+        SourceKind.SYNTHETIC,
+        SourceKind.DEVICE,
+        SourceKind.FILE,
+        SourceKind.BROWSER,
+    }
+)
 
-# The phase that will implement each not-yet-constructible kind.
+# Reason each not-yet-constructible kind is unavailable.
 _PLANNED_PHASE: dict[SourceKind, str] = {
-    SourceKind.DEVICE: "P1",
-    SourceKind.FILE: "P1",
-    SourceKind.WEBRTC: "P1",
+    SourceKind.WEBRTC: (
+        "never - the browser Web Worker ingest path (WS /ws/ingest) replaces "
+        "WebRTC; see docs/decisions.md"
+    ),
 }
 
 
@@ -75,7 +91,7 @@ def ensure_source_constructible(kind: SourceKind) -> None:
 
     if kind in _CONSTRUCTIBLE:
         return
-    phase = _PLANNED_PHASE.get(kind, "a later phase")
+    reason = _PLANNED_PHASE.get(kind, "not planned")
     raise NotImplementedError(
-        f"SourceKind.{kind.name} is not constructible in Phase 0; it is planned for {phase}."
+        f"SourceKind.{kind.name} is not constructible: {reason}."
     )

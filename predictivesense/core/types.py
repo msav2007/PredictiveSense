@@ -15,7 +15,7 @@ from __future__ import annotations
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
-from predictivesense.core.enums import Mode, RiskLevel, TrackStatus
+from predictivesense.core.enums import Mode, RiskLevel, SourceKind, TrackStatus
 
 __all__ = [
     "BBox",
@@ -28,6 +28,9 @@ __all__ = [
     "Alert",
     "StateSnapshot",
     "MailboxStats",
+    "SourceInfo",
+    "ClipManifest",
+    "IngestHeader",
 ]
 
 # (x1, y1, x2, y2) in pixels.
@@ -134,7 +137,13 @@ class StateSnapshot(_Frozen):
     tracks: list[Track] = Field(default_factory=list)
     risk: RiskState | None = None
     metrics: dict[str, float] = Field(
-        description="loop_rate_hz, dropped, consumed, iter_latency_ms."
+        description=(
+            "Free-form string->float gauges. Phase 0: loop_rate_hz, "
+            "producer_rate_hz, consumed, dropped, mailbox_depth, iter_latency_ms. "
+            "Phase 1 adds keys only (no reshape): capture_fps, analysis_fps, "
+            "dropped_analysis_frames, drop_rate, frame_age_ms, decode_ms, "
+            "ingest_bytes_per_s, reconnects, clock_offset_rtt_ms."
+        )
     )
     stale: bool = Field(
         description="True when no frame arrived within the configured threshold."
@@ -158,3 +167,49 @@ class MailboxStats(_Frozen):
     consumed: int
     dropped: int
     depth: int
+
+
+class SourceInfo(_Frozen):
+    """Static + measured description of a frame source (Phase 1).
+
+    ``width``/``height``/``achieved_fps`` are what the device or file *actually*
+    returned, never the requested values.
+    """
+
+    kind: SourceKind
+    source_id: str
+    label: str
+    width: int
+    height: int
+    achieved_fps: float | None = None
+    backend: str | None = None
+    extra: dict[str, str] = Field(default_factory=dict)
+
+
+class ClipManifest(_Frozen):
+    """Sidecar metadata for one raw clip recorded to ``data/raw/`` (Phase 1)."""
+
+    clip_id: str
+    session_id: str
+    path: str
+    scenario_tag: str
+    device_label: str
+    width: int
+    height: int
+    nominal_fps: float
+    duration_s: float | None
+    size_bytes: int
+    recorded_utc: str
+    git_commit: str
+    config_profile: str
+    consent_ack: bool
+    notes: str
+
+
+class IngestHeader(_Frozen):
+    """The JSON header of one binary ``WS /ws/ingest`` analysis-frame message."""
+
+    client_ts_ms: float
+    seq: int
+    w: int
+    h: int
