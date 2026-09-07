@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PredictiveSense - state snapshot</title>
+</head>
+<body>
+  <h1>PredictiveSense - state snapshot</h1>
+  <p>status: <span id="status">connecting...</span></p>
+  <pre id="snapshot">(waiting for first snapshot)</pre>
+  <script>
+    (function () {
+      var statusEl = document.getElementById("status");
+      var snapshotEl = document.getElementById("snapshot");
+      var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      var url = proto + "//" + window.location.host + "/ws/state";
+      var ws = new WebSocket(url);
+      ws.onopen = function () { statusEl.textContent = "connected"; };
+      ws.onclose = function () { statusEl.textContent = "disconnected"; };
+      ws.onerror = function () { statusEl.textContent = "error"; };
+      ws.onmessage = function (event) {
+        try {
+          snapshotEl.textContent = JSON.stringify(JSON.parse(event.data), null, 2);
+        } catch (e) {
+          snapshotEl.textContent = event.data;
+        }
+      };
+    })();
+  </script>
+</body>
+</html>
