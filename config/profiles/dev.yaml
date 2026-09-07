@@ -1,0 +1,30 @@
+# Development profile: modest rates, verbose logging, local-only API.
+mode: realtime
+results_dir: results
+
+logging:
+  level: INFO
+
+source:
+  kind: synthetic
+  width: 640
+  height: 480
+  target_fps: 30.0
+  seed: 12345
+
+consumer:
+  sample_rate_hz: 20.0
+  stale_after_ms: 500.0
+
+broadcast:
+  rate_hz: 10.0
+  client_send_timeout_s: 5.0
+
+api:
+  host: 127.0.0.1
+  port: 8000
+
+noop:
+  default_seconds: 60
+  csv_sample_period_s: 1.0
+  max_rss_growth_mb: 25.0

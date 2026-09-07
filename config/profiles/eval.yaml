@@ -1,0 +1,30 @@
+# Evaluation profile: recorded mode, higher resolution, quiet logging.
+mode: recorded
+results_dir: results
+
+logging:
+  level: WARNING
+
+source:
+  kind: synthetic
+  width: 1280
+  height: 720
+  target_fps: 15.0
+  seed: 2024
+
+consumer:
+  sample_rate_hz: 15.0
+  stale_after_ms: 1000.0
+
+broadcast:
+  rate_hz: 5.0
+  client_send_timeout_s: 5.0
+
+api:
+  host: 127.0.0.1
+  port: 8001
+
+noop:
+  default_seconds: 60
+  csv_sample_period_s: 1.0
+  max_rss_growth_mb: 25.0
