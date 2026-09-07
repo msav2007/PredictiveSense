@@ -329,3 +329,180 @@ No number is attached to "barely noticeable delay" — it is the developer's by-
 - **Analysis-sweep `encode ms` is a `cv2.imencode` proxy**, not the browser worker's `OffscreenCanvas.convertToBlob` time.
 - **`camera_backends.json` is machine-specific and not committed.** A fresh clone falls back to the historical MSMF-first probe order.
 - **No detection, pose, tracking, temporal state, risk model, alert policy, voice, or overlay drawing exists.** Unchanged from Phase 1. Nothing from Phase 2 has been started.
+
+---
+
+# Phase 1.6 — Interface Architecture
+
+**Date:** 2026-09-07 (UTC), same machine as §1 (`Windows-10-10.0.26200-SP0`,
+Intel Core Ultra 5 125H, integrated Intel Arc GPU, **no NVIDIA / no CUDA**,
+Python 3.11.9 `.venv`). A **presentation-layer** phase. **Phase 2 not started; no
+Phase 2 file, module or placeholder created.**
+
+The flat `<section class="panel">` stack in `predictivesense/api/static/` was
+reorganised into a video-first application shell: a top bar (product name, mode,
+status pill, Diagnostics toggle, panel-collapse toggle), a letterboxing viewport
+with a transparent `#overlay-layer`, and a collapsible right panel of collapsible
+groups. New component layer under `static/ui/`, one group module per section
+under `static/groups/`, and the `app.js` camera / worker / recording / video /
+metrics logic relocated essentially verbatim into `static/features/`. `app.js` is
+now a composition root. No framework, no bundler, no build step, no new
+dependency.
+
+## Part A — Measured
+
+### A1. Test suite
+
+| run | before (Phase 1.5) | after (Phase 1.6) |
+|---|---|---|
+| `pytest -q` | 127 passed, 1 skipped | **145 passed, 1 skipped, 1 warning** |
+| `pytest -q -m "not slow"` | 122 passed, 1 skipped, 5 deselected | **140 passed, 1 skipped, 5 deselected** |
+
+- +18 tests, all Phase 1.6 static analysis of the shipped assets (no browser
+  automation, no new dependency): `tests/unit/test_ui_structure.py` (7),
+  `tests/unit/test_ui_text.py` (6), `tests/unit/test_ui_mode_switch.py` (3),
+  `tests/integration/test_static_assets.py` (3, one parametrised over the whole
+  module graph).
+- The lone skip is unchanged: `tests/hardware/test_device_source.py`
+  (`--run-hardware`). The lone warning is the pre-existing third-party `anyio`
+  alias deprecation in `starlette.testclient`.
+- **Preservation gate green.** `test_preview_independence`, `test_ingest_socket`,
+  `test_recorded_driver`, `test_recorder_upload`, `test_camera_recovery`,
+  `test_worker_backpressure_contract` all pass unchanged. `analysis-worker.js` is
+  byte-identical. `tests/integration/test_api.py::test_index_page_served` passes
+  unchanged; `test_static_assets_served` was updated (as Phase 1 updated the
+  index-page assertions for the Block 6 rewrite) to assert `app.js` carries
+  `registerGroup` and the Worker is spawned from `features/analysis-client.js`.
+
+### A2. Asset checks
+
+- Every module referenced by `index.html` and by every `import` / `new Worker`
+  string under `static/**/*.js` (19 modules) resolves to a file that exists and
+  `GET`s 200 with a `text/javascript` content type through the app
+  (`test_static_assets.py`). `api/app.py` now calls
+  `mimetypes.add_type("text/javascript", ".js"/".mjs")` at import so a
+  `text/plain` Windows registry mapping cannot break `type="module"` loading or
+  the content-type assertion.
+- Forbidden user-facing strings (`asfast`, `backend owns the camera`,
+  `worker_skips_t`) are absent from `index.html` and every `groups/*.js`;
+  required replacements (`Fastest`, `Real-time speed`, `Worker skips`, `Live
+  preview unavailable in backend-camera mode.`) are present in the shipped JS;
+  the replay wire values (`asfast` / `realtime`, sent to `/api/analyze`) are
+  unchanged in `ui/format.js`. No `console.log(` anywhere in `static/**/*.js`
+  outside `ui/log.js` (the single Diagnostics-gated logger).
+- `index.html` carries the shell mount points (`#app-shell`, `#panel-body`,
+  `#viewport`, `#preview`, `#overlay-layer`) and none of the legacy panel-stack
+  markup (`class="panel preview"`, `class="panel metrics"`, `#metric-grid`,
+  `#browser-metrics`). `<video id="preview">` keeps `autoplay muted playsinline`;
+  the `#preview` CSS rule carries no `filter` / `transform` / `animation` /
+  `opacity` / `transition`, and no other rule animates or transforms it.
+- Five groups registered — `input` (10), `camera` (20), `video` (30), `dataset`
+  (40), `diagnostics` (100). `analysis` (50), `alerts` (60), `research` (70) are
+  declared in `static/groups/constants.js` and never passed to `registerGroup`;
+  no `groups/analysis.js` / `alerts.js` / `research.js` exists. The registry
+  throws on a duplicate id and on a reserved id.
+
+### A3. Browser render check (in-app Browser pane, camera blocked)
+
+The Browser pane blocks `getUserMedia`, so this is a **structure / interaction**
+check, not a camera check. Served by `run_app.py --profile dev --source-kind
+browser`:
+
+- Shell renders: top bar with product name, mode (`Real-time`/`Recorded video`),
+  status pill (`Ready` → `Degraded` when the camera probe was denied), Diagnostics
+  toggle, panel-collapse toggle. Top bar stays fixed.
+- All five groups mount; `input`, `camera`, `dataset` visible in Real-time;
+  switching the Input radio to Recorded video hides `camera`, shows `video`, puts
+  the empty-state message in the viewport, updates the top-bar mode. Switching
+  back restores it.
+- Panel collapse → 46 px rail with a reopen chevron, viewport widens to full
+  width, top bar keeps mode + status. Reopen restores the panel. **Collapse
+  state, mode and the Diagnostics toggle persist across a reload** (`localStorage`).
+- Diagnostics toggle reveals the Diagnostics group; expanding it shows every
+  relocated metric (preview/capture/analysis FPS, dropped frames, drop rate,
+  mailbox depth, frame age, decode ms, ingest B/s, reconnects, clock RTT, switch
+  ms, stale), the worker-skip breakdown, `capture.owner` / `device_backend`
+  provider rows, and the full Browser-measurement block with its "Capture sample
+  → results/" action — each raw key shown next to its renamed label.
+- `assertPreviewUncomposited()` ran; **no console errors or warnings** across
+  load, both mode switches, collapse/reopen, and the Diagnostics toggle.
+
+## Part B — Physically observed by the developer
+
+Carried forward verbatim from the Phase 1 / 1.5 reports (unchanged — this phase
+touched no capture default):
+
+> - **Integrated Camera:** working, very smooth, very little noticeable latency.
+>   Currently the better-feeling source.
+> - **OnePlus Nord 4 via Windows virtual camera:** working, stable, usable. Only
+>   a very small, barely noticeable delay versus the integrated camera. No major
+>   lag or freezing.
+
+**Pending developer verification (Block 10 of the Phase 1.6 prompt):**
+
+1. Real-time mode: integrated camera opens and previews in the viewport.
+2. Real-time mode: OnePlus virtual camera opens and previews.
+3. Switching between the two works and the previous device is released (no "busy"
+   virtual camera, no held device).
+4. Video is clearly the primary visual area, panel open and closed.
+5. Panel collapses and reopens cleanly.
+6. Recorded video mode can be selected and a file chosen (local review file
+   and/or a `data/videos/` entry via Analyse).
+7. No text overlaps, clips, or overflows at the working window size.
+8. The interface is understandable without documentation — camera selection,
+   video selection, recording and diagnostics are findable without searching.
+
+The Phase 1 / 1.5 camera checks that already passed are **not** invalidated by
+this phase — capture, transport, the worker, the mailbox and every API route are
+unchanged. Item 3 is re-listed only because device switching is now reached
+through the redesigned Camera group control.
+
+## Part C — Not verified / limitations
+
+- **No browser ran the camera path.** The Browser pane blocks `getUserMedia`, so
+  everything camera-side — the live preview, `track.getSettings()`, preview FPS,
+  the analysis Worker actually streaming, device switching through the new
+  control, `applyConstraints` on the Camera group's resolution select, the
+  recorded-mode local-file `<video>` playback, and `MediaRecorder` — is
+  implemented and static-analysis-covered but needs the developer. Part A3 is a
+  structure/interaction check only.
+- **Mode-switch teardown is pinned by static analysis, not a running browser.**
+  `tests/unit/test_ui_mode_switch.py` asserts the chain (leave Real-time →
+  `releaseCapture()` → `stopCurrentStream()` stops every track, nulls
+  `srcObject`, emits `stream-stopped` → `analysis-client.js` terminates the
+  worker; `app.js` invokes this on the mode change and revokes the local-file
+  object URL). That the socket then actually closes is the browser's WebSocket
+  teardown and is the developer's to confirm by eye.
+- **Behavioural deltas from the relocation** (functionally equivalent, listed for
+  the record): (1) the analysis Worker starts/stops on `runtime` bus events
+  (`stream` / `stream-stopped`) rather than a direct `startAnalysisWorker()` call
+  from `openStream`; (2) the browser-metrics panel refreshes on a
+  `sample-refresh` / `worker-metrics` event rather than a direct call; (3)
+  `connectStateSocket` additionally pushes each snapshot into the UI store and
+  maps `stale` / socket state onto the status pill; (4) the recorded-mode
+  viewport plays a locally chosen file via `URL.createObjectURL` — a client-only
+  addition, no endpoint.
+- **Responsive breakpoints below 1100 px** (panel overlays instead of
+  compressing) are CSS-only and were not exercised at 320–1024 px in a real
+  browser this pass.
+- **No detection, pose, tracking, temporal state, risk model, alert policy,
+  voice, or overlay drawing exists.** `#overlay-layer` is an empty transparent
+  container. `analysis` / `alerts` / `research` are reserved id constants with no
+  module. Nothing from Phase 2 has been started.
+
+## Part D — What changed
+
+- **Created** (`predictivesense/api/static/`): `ui/{shell,group,registry,controls,store,format,log}.js`,
+  `groups/{constants,input,camera,video,dataset,diagnostics}.js`,
+  `features/{runtime,camera-capture,analysis-client,recording,videos,metrics}.js`.
+- **Created** (tests): `tests/unit/test_ui_structure.py`,
+  `tests/unit/test_ui_text.py`, `tests/unit/test_ui_mode_switch.py`,
+  `tests/integration/test_static_assets.py`.
+- **Modified:** `static/index.html` (shell skeleton), `static/app.js`
+  (composition root), `static/app.css` (shell grid, groups, button variants,
+  overflow rules, responsive overlay), `api/app.py` (`mimetypes.add_type` only),
+  `tests/integration/test_api.py` (`test_static_assets_served` assertions),
+  `docs/architecture.md`, `docs/decisions.md`, this report, `CLAUDE.md`.
+- **Unchanged:** `static/analysis-worker.js`; every file under
+  `predictivesense/{camera,pipeline,telemetry,core,config}/`; every API route and
+  payload shape.

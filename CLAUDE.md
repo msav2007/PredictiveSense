@@ -65,7 +65,13 @@ files losslessly.
 - `predictivesense/api/recorder.py` - `POST /api/record/upload` + `GET /api/clips`: raw clip -> `data/raw/<session>/` + `ClipManifest`.
 - `predictivesense/api/videos.py` - `GET /api/videos` + `POST /api/analyze` (path confined to `video.input_dir`).
 - `predictivesense/api/broadcast.py` - `Broadcaster` + `serve_state_client`: last-value-wins, slow client dropped on timeout.
-- `predictivesense/api/static/{index.html,app.js,app.css,analysis-worker.js}` - dashboard: native `srcObject` preview, Web Worker analysis path, metrics strip, clip recorder, Mode B controls. No framework, no build. Phase 1.5: worker newest-wins + `bufferedAmount` backpressure skip + `VideoFrame` close audit; `#preview-size` selector (`applyConstraints` on the same device); device-switch stops every track and nulls `srcObject` first, and measures switch time; `ondevicechange` re-enumerates; "Browser measurement" panel + "Capture sample" -> `POST /api/metrics/browser`.
+- `predictivesense/api/static/` - dashboard. No framework, no build; ES modules served by the `/static` mount. **Phase 1.6** reorganised it into an application shell:
+  - `index.html` - shell skeleton only (top bar, viewport with `<video id="preview" autoplay muted playsinline>` + `#overlay-layer`, empty `#panel-body`). `app.js` - composition root: fetch config, `registerGroup` x5, mount shell + registry.
+  - `ui/` - `store.js` (observable UI state, `localStorage`), `shell.js`, `group.js`, `registry.js` (`registerGroup` / `registerAnalysisModule`), `controls.js` (`settingRow`/`actionButton{variant}`/`statusIndicator`/`metricRow`/`el`), `format.js` (label maps, `REPLAY_MODES`, `PREVIEW_UNAVAILABLE_TEXT`), `log.js` (the only `console.log`, gated by the Diagnostics toggle).
+  - `groups/` - `constants.js` (`GROUP_ORDER`, `RESERVED_GROUP_IDS = analysis/alerts/research`), then one module per panel section: `input`, `camera`, `video`, `dataset`, `diagnostics`. Each exports `id,title,order,modes,view,summary,render,update?`.
+  - `features/` - logic moved out of `app.js` essentially verbatim: `runtime.js` (shared capture state + event bus), `camera-capture.js`, `analysis-client.js` (owns the Worker), `recording.js`, `videos.js`, `metrics.js`.
+  - `analysis-worker.js` - **unchanged** (newest-wins + `bufferedAmount` backpressure + `VideoFrame` close audit; `capture.max_ws_buffered_bytes`).
+  - Input mode (`Real-time` / `Recorded video`) is **client-side view state** (`store`, persisted) - it does not touch the server `mode` config; recorded analysis still runs via `POST /api/analyze`, and the recorded-mode viewport plays a locally chosen file (no endpoint). Every engineering metric lives in the Diagnostics group (hidden until the top-bar toggle; raw keys shown next to renamed labels). `POST /api/metrics/browser` + the Browser-measurement block are in Diagnostics.
 - `predictivesense/logging_setup.py` - `configure_logging` / `get_logger`.
 - `scripts/run_app.py` - start the API for a profile (`--source-kind synthetic|browser|device`).
 - `scripts/run_noop.py` - 60-second instrumented no-op run (synthetic); writes `results/noop_<id>.csv` and `results/manifest_<id>.json`.
@@ -105,6 +111,53 @@ $f = & .\.venv\Scripts\python.exe -m pip freeze --exclude-editable
 [IO.File]::WriteAllText("$PWD\requirements.lock.txt", ($f -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
 ```
 
+## UI rules (permanent, Phase 1.6+)
+
+- **The dashboard is an application shell, not a panel stack.** Three CSS-grid
+  regions (top bar / viewport / collapsible right panel). No framework, no
+  bundler, no build step, no CDN asset, no external font, no runtime dependency -
+  everything ships from `static/`.
+- **Add a control by registering a group, never by editing the shell.** One call:
+  `registerGroup({ id, title, order, modes, view, summary, render, update? })` in
+  `app.js`, with a module under `static/groups/` and its logic under
+  `static/features/`. `order` comes from `static/groups/constants.js`. Analysis
+  sub-modules use `registerAnalysisModule(...)`. Worked example in
+  `docs/architecture.md`.
+- `render` runs once at mount; `update(state)` must be cheap and must not rebuild
+  the DOM; `summary(state)` must be a pure function of store state.
+- **One logical home per control - no duplicates.** Camera selection only under
+  Camera; video selection only under Recorded video; recording only under Dataset
+  & recording; every engineering metric only under Diagnostics.
+- **Never delete a metric - relocate it to Diagnostics.** Normal view keeps only
+  mode, status, current-config summaries, primary actions, and warnings that need
+  the user.
+- **Preview `<video>` is `srcObject`-only** for the live camera (never read,
+  drawn, or replaced for display); the sole read is `createImageBitmap` in the
+  rVFC analysis fallback. `assertPreviewUncomposited` must keep passing. Keep
+  `autoplay muted playsinline` on it in `index.html`; no `filter` / `transform` /
+  `animation` / `opacity` / `transition` on `#preview`.
+- **Action hierarchy is visible:** `btn-primary` (Start, Analyse, Record sample),
+  `btn-secondary` (Advanced, Diagnostics, Capture sample), `btn-danger` (Stop,
+  Delete, Clear).
+- **No `console.log`** outside `static/ui/log.js` (the Diagnostics-gated logger).
+  No unbounded listener list - `store.subscribe` returns an unsubscribe.
+- **Input mode is client-side view state only** - it must not mutate the server
+  `mode` config or add an API route. Reserved group ids `analysis` / `alerts` /
+  `research` are constants; do not create a module for them, not even empty.
+
+### Where does a new control go?
+
+| The control is about... | Group id | Modes | View |
+|---|---|---|---|
+| Choosing Real-time vs Recorded video | `input` | both | normal |
+| Live camera: device, resolution, FPS, capture tuning | `camera` | realtime | normal |
+| A recorded file: selection, replay speed, Analyse, output | `video` | recorded | normal |
+| Recording a research clip, scenario tag, notes, consent, clip list | `dataset` | both | normal |
+| Any FPS / drop / latency / byte / socket / worker counter, provider info | `diagnostics` | both | diagnostics |
+| Detection / pose / tracking readouts (later phase) | `analysis` *(reserved, order 50)* | both | normal |
+| Risk warnings, alert log, TTS state (later phase) | `alerts` *(reserved, order 60)* | both | normal |
+| Session manifest, run metadata, export (later phase) | `research` *(reserved, order 70)* | both | normal |
+
 ## Phase discipline
 
 Current phase: **Phase 1 (Input layer)** - see `PredictiveSense-P1-Prompt.md`.
@@ -118,9 +171,28 @@ speaker) verification - Phase 1 has six developer checks still pending.
 ## Current phase status
 
 Phase 1 complete, including Phase 1.5 (camera/input optimization & verification
-closing pass). `pytest -q`: **127 passed, 1 skipped** (hardware; `--run-hardware`
-to run). 10-minute synthetic no-op RSS within budget; `DeviceSource` RSS flat
-over 30 s of real capture.
+closing pass) and **Phase 1.6 (interface architecture)**. `pytest -q`:
+**145 passed, 1 skipped** (hardware; `--run-hardware` to run). 10-minute
+synthetic no-op RSS within budget; `DeviceSource` RSS flat over 30 s of real
+capture.
+
+Phase 1.6 (see `docs/phase-reports/phase1.md` "Phase 1.6" section,
+`docs/architecture.md`, `docs/decisions.md`): the flat panel stack in
+`static/` became a video-first application shell - top bar (mode, status pill,
+Diagnostics + panel-collapse toggles), letterboxing viewport with an empty
+`#overlay-layer`, collapsible right panel of collapsible groups. New `static/ui/`
+component layer + one `static/groups/` module per section (`input`, `camera`,
+`video`, `dataset`, `diagnostics`; `analysis`/`alerts`/`research` reserved, not
+registered) + `static/features/` (camera / worker / recording / video / metrics
+logic moved out of `app.js` verbatim; `app.js` is now a composition root). One
+registration call - `registerGroup(...)` - is the whole extension contract for
+later phases. Input mode is client-side view state (persisted, no backend
+switch); every metric relocated to Diagnostics; `asfast`->Fastest,
+replay `realtime`->Real-time speed, "backend owns the camera"->"Live preview
+unavailable in backend-camera mode." No API route, payload, config or contract
+changed; `analysis-worker.js` byte-unchanged; no new dependency. +18 static-asset
+tests. Browser-pane render/interaction check clean (camera itself blocked
+there - the eight Block 10 physical checks are the developer's).
 
 Phase 1.5 (see `docs/phase-reports/phase1.md` "Phase 1.5" section and
 `docs/decisions.md`): camera matrix on the Integrated Camera (index 0, 12 combos,

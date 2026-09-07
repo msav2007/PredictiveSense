@@ -48,8 +48,11 @@ def test_index_page_served(client) -> None:
 
 
 def test_static_assets_served(client) -> None:
+    # Phase 1.6: app.js is the composition root (registers panel groups); the
+    # analysis Worker is spawned from features/analysis-client.js now.
     for asset, needle in (
-        ("/static/app.js", "analysis-worker"),
+        ("/static/app.js", "registerGroup"),
+        ("/static/features/analysis-client.js", "analysis-worker.js"),
         ("/static/analysis-worker.js", "/ws/ingest"),
         ("/static/app.css", "--accent"),
     ):

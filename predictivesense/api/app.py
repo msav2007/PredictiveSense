@@ -22,6 +22,7 @@ The app binds a local listening socket and makes no outbound connections.
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
 import time
 import uuid
@@ -51,6 +52,12 @@ __all__ = ["create_app"]
 _LOG = get_logger(__name__)
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _LABEL_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+# The dashboard loads ES modules from static/ui/ and static/groups/. Some Windows
+# registries map .js to text/plain, which the browser refuses for `type=module`.
+# Pin the correct type before StaticFiles resolves it. Phase 1.6.
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/javascript", ".mjs")
 
 
 class BrowserMetricsIn(BaseModel):

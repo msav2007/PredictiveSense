@@ -3,87 +3,40 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PredictiveSense - input layer</title>
+  <title>PredictiveSense</title>
   <link rel="stylesheet" href="/static/app.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="dot" id="ws-dot" title="state socket"></span>
-      PredictiveSense <span class="phase">input layer</span>
-    </div>
-    <div class="owner" id="owner-badge">owner: &hellip;</div>
-  </header>
+  <div class="app-shell" id="app-shell" data-collapsed="false">
+    <header class="topbar">
+      <div class="tb-left">
+        <span class="tb-brand">PredictiveSense</span>
+        <span class="tb-mode" id="tb-mode">Real-time</span>
+      </div>
+      <div class="tb-right">
+        <span class="status-pill" id="status-pill" data-level="ready">Ready</span>
+        <span class="dot" id="ws-dot" title="State channel"></span>
+        <button class="btn btn-secondary" id="btn-diagnostics" type="button" aria-pressed="false">Diagnostics</button>
+        <button class="btn btn-secondary" id="btn-collapse" type="button" aria-expanded="true" aria-label="Collapse control panel">&rsaquo;</button>
+      </div>
+    </header>
 
-  <main>
-    <section class="panel preview" aria-labelledby="preview-h">
-      <h2 id="preview-h">Preview <span class="hint">native srcObject &mdash; never polled, never drawn for display</span></h2>
+    <main class="viewport" id="viewport">
       <div class="video-wrap">
         <video id="preview" autoplay muted playsinline></video>
-        <div class="unavailable" id="preview-unavailable" hidden>preview unavailable &mdash; backend owns the camera</div>
+        <div class="overlay-layer" id="overlay-layer"></div>
         <div class="rec-badge" id="rec-badge" hidden><span class="rec-dot"></span> REC <span id="rec-elapsed">0:00</span></div>
+        <div class="viewport-msg" id="viewport-msg" hidden></div>
       </div>
-      <div class="controls">
-        <label>Camera
-          <select id="device-select"><option value="">&mdash;</option></select>
-        </label>
-        <label>Preview size
-          <select id="preview-size">
-            <option value="640x480">640&times;480</option>
-            <option value="1280x720" selected>1280&times;720</option>
-            <option value="1920x1080">1920&times;1080</option>
-          </select>
-        </label>
-        <button id="record-btn" disabled>Record clip</button>
+    </main>
+
+    <aside class="control-panel" id="control-panel" aria-label="Controls">
+      <button class="panel-reopen" id="panel-reopen" type="button" aria-label="Expand control panel">&lsaquo;</button>
+      <div class="panel-scroll">
+        <div class="panel-groups" id="panel-body"></div>
       </div>
-    </section>
-
-    <section class="panel metrics" aria-labelledby="metrics-h">
-      <h2 id="metrics-h">Metrics</h2>
-      <dl class="metric-grid" id="metric-grid">
-        <div><dt>preview fps</dt><dd id="m-preview_fps">&mdash;</dd></div>
-        <div><dt>capture fps</dt><dd id="m-capture_fps">&mdash;</dd></div>
-        <div><dt>analysis fps</dt><dd id="m-analysis_fps">&mdash;</dd></div>
-        <div><dt>dropped analysis</dt><dd id="m-dropped_analysis_frames">&mdash;</dd></div>
-        <div><dt>drop rate</dt><dd id="m-drop_rate">&mdash;</dd></div>
-        <div><dt>mailbox depth</dt><dd id="m-mailbox_depth">&mdash;</dd></div>
-        <div><dt>frame age ms</dt><dd id="m-frame_age_ms">&mdash;</dd></div>
-        <div><dt>decode ms</dt><dd id="m-decode_ms">&mdash;</dd></div>
-        <div><dt>ingest B/s</dt><dd id="m-ingest_bytes_per_s">&mdash;</dd></div>
-        <div><dt>reconnects</dt><dd id="m-reconnects">&mdash;</dd></div>
-        <div><dt>clock rtt ms</dt><dd id="m-clock_offset_rtt_ms">&mdash;</dd></div>
-        <div><dt>switch ms</dt><dd id="m-switch_ms">&mdash;</dd></div>
-        <div><dt>stale</dt><dd id="m-stale">&mdash;</dd></div>
-      </dl>
-      <p class="note" id="ingest-note">analysis worker: idle</p>
-    </section>
-
-    <section class="panel browser-metrics" aria-labelledby="bm-h">
-      <h2 id="bm-h">Browser measurement <span class="hint">requested vs achieved, worker + backend</span></h2>
-      <dl class="metric-grid" id="browser-metrics"><div><dt>&mdash;</dt><dd>waiting for stream</dd></div></dl>
-      <div class="controls">
-        <label>Sample label <input id="metrics-label" type="text" value="browser" /></label>
-        <button id="metrics-sample-btn">Capture sample &rarr; results/</button>
-      </div>
-    </section>
-
-    <section class="panel record-meta" aria-labelledby="rec-h">
-      <h2 id="rec-h">Clip metadata</h2>
-      <label>Scenario tag <input id="scenario-tag" type="text" value="cabin-unlabelled" /></label>
-      <label>Notes <input id="clip-notes" type="text" placeholder="optional" /></label>
-      <label class="consent"><input id="consent-ack" type="checkbox" /> Consent acknowledged for everyone on camera</label>
-      <ul class="clip-list" id="clip-list"></ul>
-    </section>
-
-    <section class="panel videos" aria-labelledby="videos-h">
-      <h2 id="videos-h">Recorded video (Mode B)</h2>
-      <label>Replay
-        <select id="replay-mode"><option value="asfast">asfast</option><option value="realtime">realtime</option></select>
-      </label>
-      <ul class="video-list" id="video-list"></ul>
-      <pre class="analyze-out" id="analyze-out" hidden></pre>
-    </section>
-  </main>
+    </aside>
+  </div>
 
   <script src="/static/app.js" type="module"></script>
 </body>

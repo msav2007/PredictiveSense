@@ -71,3 +71,62 @@ Every keep/reject below carries its measurement. Full tables: `results/camera_ma
 - **Requirement 8/9 guard.** `assertPreviewUncomposited()` warns (console + note) if the `<video>` element has a non-`none` `filter`/`transform`/`box-shadow`/`animation`. The only read of `<video>` remains `createImageBitmap(video)` in the `MediaStreamTrackProcessor`-absent analysis fallback, now commented as such.
 - **No new dependency.** `psutil` (already present) is used by both benchmark scripts. No WebRTC, no WebCodecs `VideoEncoder`, no new transport.
 - **`config/benchmarked_camera_combos.json` added and committed.** Records the swept axes; `tests/unit/test_capture_config.py::test_shipped_defaults_are_benchmarked` asserts every shipped dev/eval capture default is a point on that grid so a future edit cannot silently drift from the evidence.
+
+## Phase 1.6 - interface architecture (2026-09-07)
+
+Presentation-layer only. No camera, transport, mailbox, telemetry, API route,
+payload shape, config schema or contract changed. `pytest -q`: **127 -> 145
+passed, 1 skipped** (+18 UI static-analysis tests).
+
+- **The flat `<section class="panel">` stack is replaced with a CSS-grid
+  application shell** (top bar / viewport / collapsible right panel) built from a
+  small component layer under `static/ui/` and one group module per panel section
+  under `static/groups/`. No framework, no bundler, no build step - ES modules
+  served by the existing `/static` mount. Rationale: establish the interface
+  architecture once so the six later phases register controls into an existing
+  structure instead of redesigning the page each time.
+- **The extension contract is one call: `registerGroup({id,title,order,modes,view,summary,render,update?})`**
+  (+ `registerAnalysisModule(...)` for future Analysis sub-modules). `order`
+  values live in `static/groups/constants.js`; `analysis` (50), `alerts` (60),
+  `research` (70) are reserved there and **not** registered - no module file for
+  them, not even empty. Documented with a worked example in `docs/architecture.md`.
+- **Input mode is client-side view state, not a backend switch.** `store.mode`
+  (`realtime` | `recorded`) is persisted in `localStorage` and only selects which
+  groups show and what fills the viewport. The server `mode` config field is
+  untouched; recorded analysis still runs through `POST /api/analyze` on a
+  server-side path. The recorded-mode viewport plays a **locally chosen** file
+  (`<input type="file">` + `URL.createObjectURL`) - no new endpoint, no
+  `data/videos/` streaming route. Chosen over adding a video static-mount so the
+  API surface stays frozen.
+- **Logic moved, not rewritten.** `app.js` camera / worker / recording / video /
+  metrics functions are relocated essentially verbatim into `static/features/*`;
+  `app.js` is now a composition root. Behavioural deltas, both to decouple the
+  modules and each listed in the phase report: (1) the analysis Worker starts /
+  stops on `runtime` bus events (`stream` / `stream-stopped`) instead of a direct
+  `startAnalysisWorker()` call from `openStream`; (2) the browser-metrics panel
+  refreshes on a `sample-refresh` / `worker-metrics` event instead of a direct
+  call; (3) `connectStateSocket` now also pushes each snapshot into the UI store
+  and maps `stale` / socket state onto the top-bar status pill. The preview
+  `<video>` is still only ever assigned `srcObject`; `assertPreviewUncomposited`
+  is preserved and still called from the composition root.
+- **User-facing renames (raw keys kept in Diagnostics):** `asfast` -> **Fastest**,
+  replay `realtime` -> **Real-time speed** (the wire values sent to
+  `/api/analyze` are unchanged - the map lives in `static/ui/format.js`);
+  `worker_skips_t/b/p` -> **Worker skips** with the throttle/busy/backpressure
+  breakdown shown in Diagnostics; "backend owns the camera" -> **"Live preview
+  unavailable in backend-camera mode."**
+- **`mimetypes.add_type("text/javascript", ".js"/".mjs")` at `api/app.py` import
+  time.** Some Windows registries map `.js` to `text/plain`, which browsers
+  refuse for `type="module"` and which would fail the new
+  `test_static_assets.py` content-type check. Not an API change; it only fixes
+  the MIME `StaticFiles` reports for the new `ui/` and `groups/` module tree.
+- **`tests/integration/test_api.py` updated** (as Phase 1 updated it for the
+  Block 6 rewrite): `test_static_assets_served` now asserts `app.js` contains
+  `registerGroup` and that the Worker is spawned from
+  `features/analysis-client.js`; `test_index_page_served` is unchanged and still
+  passes. New tests: `test_ui_structure.py`, `test_ui_text.py`,
+  `test_ui_mode_switch.py` (unit, static analysis of the shipped assets),
+  `test_static_assets.py` (integration, every referenced module resolves + serves
+  as JavaScript).
+- **No new dependency, no CUDA, no cloud, no CDN/external font.** Everything
+  ships from `static/`. `analysis-worker.js` is byte-unchanged.

@@ -251,3 +251,130 @@ page-side only and is not in the backend snapshot.
 No detector, pose estimator, tracker, feature builder, risk model, alert policy,
 TTS, or overlay drawing. No `aiortc`/WebRTC, Docker, CI, database. `cv2` is
 imported only under `predictivesense/camera/`.
+
+---
+
+# Phase 1.6 - interface architecture
+
+A presentation-layer phase. No camera, transport, mailbox, telemetry, API,
+config or contract behaviour changed. The flat `<section class="panel">` stack
+was replaced with a video-first application shell so the six phases that follow
+add capability into an existing structure.
+
+## Shell
+
+Three CSS-grid regions in `predictivesense/api/static/index.html` (no framework,
+no build step, ES modules served by the existing `/static` mount):
+
+- **Top bar** - product name, active mode (`Real-time` / `Recorded video`),
+  system status pill (`Ready` / `Running` / `Degraded` / `Error`), a
+  **Diagnostics** toggle, a **panel-collapse** toggle. `position: sticky`; never
+  scrolls away.
+- **Viewport** - fills the remaining space; holds `<video id="preview">` (native
+  `srcObject` only), `#overlay-layer` (transparent, later phases draw into it),
+  the recording indicator, and `#viewport-msg` (empty / error / camera-loss
+  states). Letterboxes any aspect ratio with `object-fit: contain`; never below
+  45 % of window width while the panel is open (`grid-template-columns:
+  minmax(45%, 1fr) var(--panel-w)`). Below 1100 px the panel overlays instead.
+- **Control panel** - collapsible to a 46 px rail with an obvious reopen control;
+  collapse state persists in `localStorage`.
+
+## Component layer - `predictivesense/api/static/ui/`
+
+| module | responsibility |
+|---|---|
+| `store.js` | observable UI state: `mode`, `diagnosticsVisible`, `panelCollapsed`, `openGroups`, plus the latest `StateSnapshot` and feature-published summary blocks. Subscribers re-render; the persisted keys go to `localStorage`. |
+| `shell.js` | binds the top bar / viewport / panel skeleton; owns collapse + diagnostics state. |
+| `group.js` | renders one collapsible group: title, one-line summary, open/close control (`aria-expanded`), body. `render` runs once at mount; `update` is a cheap per-state refresh that must not rebuild the DOM; `summary` is a pure function of state. A `render` that throws is caught and shown as a single failed-group message. |
+| `registry.js` | holds group + analysis-module definitions, sorts by `order`, filters by mode and by normal/diagnostics view, mounts once, re-renders on state change. Rejects a duplicate or reserved id. |
+| `controls.js` | shared primitives: `settingRow`, `actionButton({variant: primary\|secondary\|danger})`, `statusIndicator`, `metricRow`, `summaryLine`, and a tiny `el()` hyperscript. |
+| `format.js` | label maps (raw key -> Normal-view string), `REPLAY_MODES`, `PREVIEW_UNAVAILABLE_TEXT`, number / ellipsis helpers. |
+| `log.js` | the single debug logger, gated by the Diagnostics toggle; the only file allowed to call `console.log`. `note()` also routes the line into the store for the Diagnostics group. |
+
+## Feature layer - `predictivesense/api/static/features/`
+
+The camera, worker, recording, video and metrics logic moved out of `app.js`
+**essentially verbatim**; `app.js` is now only a composition root.
+
+| module | moved from `app.js` |
+|---|---|
+| `runtime.js` | the old module-level `state` object + a tiny event bus (`stream`, `stream-stopped`, `worker-metrics`, `sample-refresh`). |
+| `camera-capture.js` | `startBrowserCapture`, `populateDevices`, `openStream`, device switching, `wirePreviewSize` (applyConstraints), `markSwitchComplete`, `measurePreviewFps`, `assertPreviewUncomposited`. |
+| `analysis-client.js` | `startAnalysisWorker`, `pumpBitmaps`. Starts/stops on the `stream` / `stream-stopped` events instead of a direct call. |
+| `recording.js` | `MediaRecorder` start/stop, `uploadRecording`, `loadClips`. |
+| `videos.js` | `loadVideos`, `analyzeVideo`, plus client-side local-file preview via `URL.createObjectURL` (no API call). |
+| `metrics.js` | `connectStateSocket`, `currentBrowserSample`, `refreshBrowserMetricsPanel`, `wireMetricsSample`. Now also pushes each snapshot into the store and maps stale / socket state onto the status pill. |
+
+`analysis-worker.js` is unchanged. Preview independence, the newest-wins mailbox
+and the worker `bufferedAmount` backpressure are untouched.
+
+## Input mode is client-side view state
+
+`store.mode` (`realtime` | `recorded`) is **UI state only**, persisted in
+`localStorage`. It selects which groups show and which source fills the viewport.
+It does **not** mutate the server's `mode` config field. Recorded analysis still
+runs through the existing `POST /api/analyze` on a server-side path; the
+recorded-mode viewport plays a **locally chosen** file (`<input type="file">` +
+object URL) and touches no endpoint. Switching to Recorded stops every camera
+track, terminates the worker, and closes the ingest socket (the teardown chain
+is pinned by `tests/unit/test_ui_mode_switch.py`); switching back re-acquires.
+
+## Normal vs Diagnostics
+
+Every engineering metric that used to be on the page moved into the
+**Diagnostics** group (`view: "diagnostics"`), which is hidden until the top-bar
+Diagnostics toggle is on (state persists). Nothing was deleted. Normal view
+keeps only mode, system status, current-configuration summaries, primary
+actions, and warnings that require user action. Raw metric keys are shown in
+Diagnostics next to their renamed labels.
+
+## The extension contract
+
+Every later phase adds its controls with exactly one call. `order` comes from
+`predictivesense/api/static/groups/constants.js`; `analysis` (50), `alerts` (60)
+and `research` (70) are reserved there and are **not** registered in Phase 1.6.
+
+```js
+import { registerGroup } from "/static/ui/registry.js";
+import { GROUP_ORDER } from "/static/groups/constants.js";
+
+// groups/alerts.js  (a later phase)
+export const id = "alerts";
+export const title = "Alerts";
+export const order = GROUP_ORDER.alerts;      // 60 - reserved slot, no renegotiation
+export const modes = ["realtime", "recorded"];
+export const view = "normal";                  // or "diagnostics"
+export function summary(state) {
+  // pure function of store state - no DOM reads
+  return state.snapshot?.risk ? "1 active alert" : "No active alerts";
+}
+export function render(el, ctx) {
+  // build the body ONCE; wire to a feature module under features/
+  el.append(/* ... */);
+}
+export function update(state) {
+  // OPTIONAL: cheap per-snapshot refresh; must not rebuild the DOM
+}
+
+// app.js
+registerGroup(alertsGroup);   // that is the whole integration
+```
+
+Analysis sub-modules (Detection, Pose, Tracking, ...) that a later phase nests
+inside a single Analysis group use the sibling call:
+
+```js
+import { registerAnalysisModule } from "/static/ui/registry.js";
+registerAnalysisModule({ id: "detection", title: "Detection", order: 10, summary, render, update });
+```
+
+`getAnalysisModules()` returns them sorted by `order`. Neither call is used in
+Phase 1.6 beyond the five real groups (`input`, `camera`, `video`, `dataset`,
+`diagnostics`).
+
+## Still absent after Phase 1.6
+
+Unchanged from Phase 1: no detector, pose, tracker, temporal state, risk model,
+alert policy, TTS, or overlay drawing. `#overlay-layer` is an empty transparent
+container. The `analysis`, `alerts`, `research` group ids are reserved constants
+only - no module, not even empty.
