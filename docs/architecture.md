@@ -144,8 +144,16 @@ WS /ws/ingest handler: decode framing -> asyncio.to_thread(BrowserSource.submit)
 ```
 
 Two single-slot newest-wins buffers in series (the browser-source buffer and the
-Phase 0 mailbox), each with exact drop accounting. Nothing queues. The worker
-also drops (never queues) when `ws.bufferedAmount` is not draining.
+Phase 0 mailbox), each with exact drop accounting. Nothing queues.
+
+The **worker** is also bounded (Phase 1.5): at most one encode+send is in flight
+(`encodeBusy`) - a frame arriving mid-encode is dropped (`skipBusy`), never
+queued; before *and* after the encode it checks `ws.bufferedAmount` against
+`capture.max_ws_buffered_bytes` (default 1 MB) and skips over the ceiling
+(`skipBackpressure`); `drawImage` is synchronous so every `VideoFrame` /
+`ImageBitmap` is closed immediately (`framesIn === framesClosed`, reported each
+1 s with a `leaked` count). The rule is pinned by
+`tests/unit/test_worker_backpressure_contract.py`.
 
 ### Ingest wire format
 
@@ -178,6 +186,11 @@ error bar (`clock_offset_rtt_ms` in the snapshot metrics and, for `run_app`, in
 
 `cv2.VideoCapture`, `CAP_MSMF` first, automatic fallback to `CAP_DSHOW` if no
 frame arrives within `capture.open_timeout_s`; the winning backend is logged.
+With `device_backend: auto` and a `backend_cache_dir` (wired to
+`config.results_dir` by `build_camera_source`), `DeviceSource` consults
+`results/camera_backends.json` - written by `scripts/benchmark_camera_matrix.py`
+with the measured winner per index - and opens that backend first, still falling
+back to the other. The cache is machine-specific and not committed.
 Requested width/height/fps come from config; `info()` reports what the device
 **actually** returned. Read failures trigger a bounded exponential-backoff
 reconnect (`reconnect_initial_s` .. `reconnect_max_s`); attempts and total
@@ -220,6 +233,7 @@ git-ignored; clips are never committed.
 | POST | `/api/record/upload` | multipart clip + metadata -> `ClipManifest` |
 | GET | `/api/clips` | List clip manifests |
 | POST | `/api/debug/stall` | Stall the analysis consumer N s (preview-independence check) |
+| POST | `/api/metrics/browser` | Phase 1.5: append a labelled browser-measured sample block to `results/browser_metrics_<label>.json` (label slugified; no path traversal) |
 | GET | `/static/*` | Dashboard JS/CSS (`StaticFiles`) |
 
 `/health`, `/api/config`, `/ws/state`, `/` keep their Phase 0 shapes.

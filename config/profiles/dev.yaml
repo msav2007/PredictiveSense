@@ -40,21 +40,28 @@ capture:
   request_width: 1280
   request_height: 720
   request_fps: 30
-  # Measured on the integrated camera: MSMF negotiates its own format at a full
-  # 30 fps up to 1080p with zero drops; forcing MJPG gave no gain and adds JPEG
-  # decode. Leave fourcc auto. buffer_size 1 = newest-frame-only (no-op on MSMF,
-  # helps DSHOW / virtual-camera latency).
+  # Measured on the integrated camera (results/camera_matrix_integrated.md):
+  # MSMF negotiates its own format at a full 30 fps up to 1080p with zero drops;
+  # forcing MJPG gave no gain and adds JPEG decode. Leave fourcc auto.
+  # buffer_size 1 = newest-frame-only (no-op on MSMF, helps DSHOW /
+  # virtual-camera latency).
   fourcc: auto
   buffer_size: 1
   warmup_frames: 0
   open_timeout_s: 5.0
   reconnect_initial_s: 0.5
   reconnect_max_s: 8.0
+  # Analysis-path defaults from results/analysis_sweep_loopback.md: 10 fps /
+  # 640x480 / q0.70 gives the lowest frame age + drops at usable quality.
   analysis_fps: 10
   analysis_width: 640
   analysis_height: 480
   analysis_jpeg_quality: 0.7
   max_ingest_message_bytes: 2000000
+  # Worker skips (never queues) an analysis frame when the WS send buffer is
+  # above this. results/analysis_sweep_loopback.md: keeps frame age bounded
+  # when the consumer briefly stalls.
+  max_ws_buffered_bytes: 1000000
 
 recorder:
   enabled: true

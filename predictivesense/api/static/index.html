@@ -27,6 +27,13 @@
         <label>Camera
           <select id="device-select"><option value="">&mdash;</option></select>
         </label>
+        <label>Preview size
+          <select id="preview-size">
+            <option value="640x480">640&times;480</option>
+            <option value="1280x720" selected>1280&times;720</option>
+            <option value="1920x1080">1920&times;1080</option>
+          </select>
+        </label>
         <button id="record-btn" disabled>Record clip</button>
       </div>
     </section>
@@ -45,9 +52,19 @@
         <div><dt>ingest B/s</dt><dd id="m-ingest_bytes_per_s">&mdash;</dd></div>
         <div><dt>reconnects</dt><dd id="m-reconnects">&mdash;</dd></div>
         <div><dt>clock rtt ms</dt><dd id="m-clock_offset_rtt_ms">&mdash;</dd></div>
+        <div><dt>switch ms</dt><dd id="m-switch_ms">&mdash;</dd></div>
         <div><dt>stale</dt><dd id="m-stale">&mdash;</dd></div>
       </dl>
       <p class="note" id="ingest-note">analysis worker: idle</p>
+    </section>
+
+    <section class="panel browser-metrics" aria-labelledby="bm-h">
+      <h2 id="bm-h">Browser measurement <span class="hint">requested vs achieved, worker + backend</span></h2>
+      <dl class="metric-grid" id="browser-metrics"><div><dt>&mdash;</dt><dd>waiting for stream</dd></div></dl>
+      <div class="controls">
+        <label>Sample label <input id="metrics-label" type="text" value="browser" /></label>
+        <button id="metrics-sample-btn">Capture sample &rarr; results/</button>
+      </div>
     </section>
 
     <section class="panel record-meta" aria-labelledby="rec-h">

@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 
 from predictivesense.camera._opencv import fourcc_to_str, quiet_opencv_logging
+from predictivesense.camera.enumerate import load_backend_hint
 from predictivesense.core.enums import SourceKind
 from predictivesense.core.types import Frame, SourceInfo
 from predictivesense.logging_setup import get_logger
@@ -60,11 +62,13 @@ class DeviceSource:
         open_timeout_s: float = 5.0,
         reconnect_initial_s: float = 0.5,
         reconnect_max_s: float = 8.0,
+        backend_cache_dir: Path | str | None = None,
     ) -> None:
         if backend not in ("auto", "msmf", "dshow"):
             raise ValueError(f"unknown device backend {backend!r}")
         self._index = int(index)
         self._backend_pref = backend
+        self._backend_cache_dir = backend_cache_dir
         self._req_w = int(request_width)
         self._req_h = int(request_height)
         self._req_fps = float(request_fps)
@@ -260,9 +264,21 @@ class DeviceSource:
         return True
 
     def _candidate_backends(self) -> list[tuple[str, int]]:
-        if self._backend_pref == "auto":
-            return [("msmf", _BACKENDS["msmf"]), ("dshow", _BACKENDS["dshow"])]
-        return [(self._backend_pref, _BACKENDS[self._backend_pref])]
+        if self._backend_pref != "auto":
+            return [(self._backend_pref, _BACKENDS[self._backend_pref])]
+        order = ["msmf", "dshow"]
+        if self._backend_cache_dir is not None:
+            hint = load_backend_hint(self._index, self._backend_cache_dir)
+            if hint in order:
+                order.remove(hint)
+                order.insert(0, hint)
+                _LOG.info(
+                    "device %d: backend cache prefers %s (from %s)",
+                    self._index,
+                    hint,
+                    self._backend_cache_dir,
+                )
+        return [(name, _BACKENDS[name]) for name in order]
 
     def _open_locked(self, probe_timeout_s: float) -> None:
         """Open the device, trying each candidate backend until one yields a frame."""

@@ -1,0 +1,18 @@
+{
+  "_comment": "Phase 1.5. The parameter axes actually swept by the two benchmark scripts. The shipped dev/eval capture defaults MUST be a point on these axes - tests/unit/test_capture_config.py::test_shipped_defaults_are_benchmarked enforces it so a future edit cannot silently drift from the evidence. Widen the sweep -> update this file.",
+  "camera_matrix": {
+    "script": "scripts/benchmark_camera_matrix.py",
+    "evidence": "results/camera_matrix_integrated.md",
+    "resolutions": [[640, 480], [1280, 720], [1920, 1080]],
+    "request_fps": [30.0],
+    "device_backend": ["auto", "msmf", "dshow"],
+    "fourcc": ["auto", "MJPG"]
+  },
+  "analysis_path": {
+    "script": "scripts/benchmark_analysis_path.py",
+    "evidence": "results/analysis_sweep_loopback.md",
+    "analysis_fps": [5.0, 10.0, 15.0],
+    "analysis_sizes": [[480, 360], [640, 480], [800, 600]],
+    "analysis_jpeg_quality": [0.5, 0.7, 0.85]
+  }
+}

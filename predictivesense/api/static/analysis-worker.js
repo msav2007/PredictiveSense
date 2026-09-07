@@ -7,19 +7,49 @@
  *   [ 4-byte BE header length | UTF-8 JSON {client_ts_ms,seq,w,h} | JPEG bytes ]
  *
  * This is a push path for analysis only. It is not the preview and it never
- * polls. Backpressure is handled by dropping frames (no queue) when the socket
- * buffer is not draining.
+ * polls. Two rules keep it bounded (Phase 1.5):
+ *
+ *   1. Newest-wins: at most ONE encode+send is in flight. A frame that arrives
+ *      while an encode is running is dropped, never queued.
+ *   2. Backpressure skip: before sending, if ws.bufferedAmount exceeds
+ *      cfg.maxWsBufferedBytes the frame is dropped and counted. This is the
+ *      direct fix for frame age creeping upward when the link or consumer lags.
+ *
+ * Every VideoFrame / ImageBitmap taken from the stream is closed on every path
+ * (framesIn === framesClosed is asserted by the metrics report).
  */
 "use strict";
 
-const cfg = { wsUrl: "", fps: 10, width: 640, height: 480, quality: 0.7 };
+const cfg = {
+  wsUrl: "",
+  fps: 10,
+  width: 640,
+  height: 480,
+  quality: 0.7,
+  maxWsBufferedBytes: 1_000_000,
+};
+
 let canvas = null;
 let ctx = null;
 let ws = null;
-let ready = false;       // handshake complete
+let ready = false; // handshake complete
 let seq = 0;
 let lastSendMs = 0;
 let helloSentMs = 0;
+let wsRttMs = null; // browser-observed hello round trip (approx)
+
+let encodeBusy = false; // newest-wins guard: one encode in flight at a time
+
+const counters = {
+  framesIn: 0, // frames pulled from the stream
+  framesClosed: 0, // frames released (must equal framesIn)
+  framesSent: 0, // binary messages actually put on the wire
+  skipThrottle: 0, // dropped: under the fps interval
+  skipBusy: 0, // dropped: an encode was still in flight (newest-wins)
+  skipBackpressure: 0, // dropped: ws.bufferedAmount over the ceiling
+};
+let encMsLast = 0;
+let encMsEwma = 0;
 
 function nowMs() {
   return performance.timeOrigin + performance.now();
@@ -27,6 +57,22 @@ function nowMs() {
 
 function status(text) {
   self.postMessage({ type: "status", text });
+}
+
+function reportMetrics() {
+  self.postMessage({
+    type: "metrics",
+    metrics: {
+      ...counters,
+      leaked: counters.framesIn - counters.framesClosed,
+      seq,
+      encodeMsLast: Number(encMsLast.toFixed(2)),
+      encodeMsAvg: Number(encMsEwma.toFixed(2)),
+      bufferedAmount: ws ? ws.bufferedAmount : 0,
+      wsRttMs: wsRttMs === null ? null : Number(wsRttMs.toFixed(2)),
+      ready,
+    },
+  });
 }
 
 function connect() {
@@ -39,14 +85,22 @@ function connect() {
   ws.onmessage = (ev) => {
     if (ready) return;
     let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
+    try {
+      msg = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
     if (msg.type === "hello_ack") {
+      wsRttMs = nowMs() - helloSentMs;
       ws.send(JSON.stringify({ type: "echo", rtt_probe: msg.rtt_probe }));
       ready = true;
       status("streaming");
     }
   };
-  ws.onclose = () => { ready = false; status("socket closed"); };
+  ws.onclose = () => {
+    ready = false;
+    status("socket closed");
+  };
   ws.onerror = () => status("socket error");
 }
 
@@ -66,17 +120,63 @@ function frameMessage(bytes) {
   return buf;
 }
 
-async function encodeAndSend(source) {
-  if (!ready || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (ws.bufferedAmount > 1_000_000) return; // socket not draining: drop frame
+/* Decide whether this sampled frame should be encoded+sent right now.
+ * Returns a reason string when the frame is dropped, or null to proceed. */
+function dropReason() {
+  if (!ready || !ws || ws.readyState !== WebSocket.OPEN) return "notReady";
   const t = performance.now();
-  if (t - lastSendMs < 1000 / cfg.fps) return;
-  lastSendMs = t;
+  if (t - lastSendMs < 1000 / cfg.fps) return "throttle";
+  if (encodeBusy) return "busy"; // newest-wins: never queue behind an encode
+  if (ws.bufferedAmount > cfg.maxWsBufferedBytes) return "backpressure";
+  return null;
+}
 
-  ctx.drawImage(source, 0, 0, cfg.width, cfg.height);
-  const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: cfg.quality });
-  const bytes = new Uint8Array(await blob.arrayBuffer());
-  if (ws.readyState === WebSocket.OPEN) ws.send(frameMessage(bytes));
+/* Draw `source` into the analysis canvas synchronously (so the caller can close
+ * the frame immediately), then encode + send asynchronously. */
+function handleFrame(source) {
+  const reason = dropReason();
+  if (reason === "throttle") counters.skipThrottle++;
+  else if (reason === "busy") counters.skipBusy++;
+  else if (reason === "backpressure") counters.skipBackpressure++;
+  if (reason) return;
+
+  lastSendMs = performance.now();
+  encodeBusy = true;
+  try {
+    ctx.drawImage(source, 0, 0, cfg.width, cfg.height);
+  } catch (err) {
+    encodeBusy = false;
+    status(`drawImage failed: ${err}`);
+    return;
+  }
+  void finishEncode();
+}
+
+async function finishEncode() {
+  const t0 = performance.now();
+  try {
+    const blob = await canvas.convertToBlob({
+      type: "image/jpeg",
+      quality: cfg.quality,
+    });
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    encMsLast = performance.now() - t0;
+    encMsEwma = encMsEwma === 0 ? encMsLast : encMsEwma * 0.8 + encMsLast * 0.2;
+    if (
+      ws &&
+      ws.readyState === WebSocket.OPEN &&
+      ws.bufferedAmount <= cfg.maxWsBufferedBytes
+    ) {
+      ws.send(frameMessage(bytes));
+      counters.framesSent++;
+    } else {
+      counters.skipBackpressure++;
+    }
+  } catch (err) {
+    status(`encode error: ${err}`);
+  } finally {
+    encodeBusy = false;
+  }
 }
 
 async function pumpReadable(readable) {
@@ -92,10 +192,12 @@ async function pumpReadable(readable) {
     }
     if (chunk.done) break;
     const frame = chunk.value; // VideoFrame
+    counters.framesIn++;
     try {
-      await encodeAndSend(frame);
+      handleFrame(frame);
     } finally {
-      frame.close();
+      frame.close(); // closed on every path: success, drop, or throw
+      counters.framesClosed++;
     }
   }
 }
@@ -108,14 +210,24 @@ self.onmessage = (ev) => {
     cfg.width = d.width;
     cfg.height = d.height;
     cfg.quality = d.quality;
+    if (typeof d.maxWsBufferedBytes === "number" && d.maxWsBufferedBytes > 0) {
+      cfg.maxWsBufferedBytes = d.maxWsBufferedBytes;
+    }
     canvas = new OffscreenCanvas(cfg.width, cfg.height);
     ctx = canvas.getContext("2d", { alpha: false });
     connect();
+    setInterval(reportMetrics, 1000);
     if (d.readable) pumpReadable(d.readable);
     else status("awaiting bitmaps (rVFC fallback)");
     return;
   }
   if (d.type === "bitmap" && d.bitmap) {
-    encodeAndSend(d.bitmap).finally(() => d.bitmap.close());
+    counters.framesIn++;
+    try {
+      handleFrame(d.bitmap);
+    } finally {
+      d.bitmap.close();
+      counters.framesClosed++;
+    }
   }
 };

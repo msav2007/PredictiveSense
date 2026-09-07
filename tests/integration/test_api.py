@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,6 +56,30 @@ def test_static_assets_served(client) -> None:
         r = client.get(asset)
         assert r.status_code == 200, asset
         assert needle in r.text
+
+
+def test_browser_metrics_endpoint_appends(dev_config, tmp_path) -> None:
+    cfg = dev_config.model_copy(update={"results_dir": tmp_path})
+    app = create_app(cfg, start_loop=False)
+    with TestClient(app) as c:
+        r1 = c.post(
+            "/api/metrics/browser",
+            json={"label": "int/../egrated", "sample": {"preview_fps": 29.9}},
+        )
+        assert r1.status_code == 200
+        body = r1.json()
+        assert body["ok"] is True and body["samples"] == 1
+        # label is slugified - separators AND dots stripped, no path traversal
+        out = tmp_path / "browser_metrics_int----egrated.json"
+        assert Path(body["path"]) == out and out.is_file()
+
+        r2 = c.post(
+            "/api/metrics/browser",
+            json={"label": "int/../egrated", "sample": {"preview_fps": 30.1}},
+        )
+        assert r2.json()["samples"] == 2
+    data = out.read_text(encoding="utf-8")
+    assert "preview_fps" in data and data.count("received_utc") == 2
 
 
 def test_cameras_endpoint_shape(client, monkeypatch) -> None:

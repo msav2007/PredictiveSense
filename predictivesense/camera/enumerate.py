@@ -12,18 +12,75 @@ never fatal.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from predictivesense.core.enums import SourceKind
 from predictivesense.core.types import SourceInfo
 from predictivesense.logging_setup import get_logger
 
-__all__ = ["enumerate_devices", "as_api_rows", "DeviceProbe", "NameResolver"]
+__all__ = [
+    "enumerate_devices",
+    "as_api_rows",
+    "DeviceProbe",
+    "NameResolver",
+    "backend_cache_path",
+    "load_backend_hint",
+    "save_backend_hint",
+]
 
 _LOG = get_logger(__name__)
 _DEFAULT_MAX_INDEX = 9
+_BACKEND_CACHE_NAME = "camera_backends.json"
 _warned_no_pygrabber = False
+
+
+def backend_cache_path(results_dir: Path | str = "results") -> Path:
+    """Location of the per-device winning-backend cache written by the matrix."""
+
+    return Path(results_dir) / _BACKEND_CACHE_NAME
+
+
+def load_backend_hint(index: int, results_dir: Path | str = "results") -> str | None:
+    """Return the cached winning backend for ``index`` (``"msmf"``/``"dshow"``).
+
+    The cache is written by ``scripts/benchmark_camera_matrix.py`` so that
+    ``capture.device_backend: auto`` can open the known-good backend first
+    instead of probing MSMF then DSHOW with a timeout every start. A missing,
+    unreadable, or stale cache simply returns ``None`` and the caller falls back
+    to the full probe order.
+    """
+
+    path = backend_cache_path(results_dir)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get(str(index)) if isinstance(data, dict) else None
+    return value if value in ("msmf", "dshow") else None
+
+
+def save_backend_hint(
+    index: int, backend: str, results_dir: Path | str = "results"
+) -> None:
+    """Merge ``index -> backend`` into the backend cache. Best-effort, non-fatal."""
+
+    if backend not in ("msmf", "dshow"):
+        return
+    path = backend_cache_path(results_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        existing[str(index)] = backend
+        path.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - disk failure only
+        _LOG.warning("could not write camera backend cache %s: %r", path, exc)
 
 # (index, backend_hint) -> (available, backend_that_opened_or_None)
 DeviceProbe = Callable[[int, str], tuple[bool, str | None]]

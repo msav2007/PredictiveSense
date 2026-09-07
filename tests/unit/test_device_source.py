@@ -7,10 +7,13 @@ Timing / threaded reconnect behaviour lives in
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import pytest
 
 from predictivesense.camera.device import DeviceSource
+from predictivesense.camera.enumerate import save_backend_hint
 from tests.fixtures.camfakes import FakeCap, factory
 
 pytestmark = pytest.mark.unit
@@ -19,6 +22,23 @@ pytestmark = pytest.mark.unit
 def test_bad_backend_rejected() -> None:
     with pytest.raises(ValueError):
         DeviceSource(0, backend="v4l2")
+
+
+def test_auto_backend_order_default_is_msmf_first() -> None:
+    src = DeviceSource(0, backend="auto")
+    assert [name for name, _ in src._candidate_backends()] == ["msmf", "dshow"]
+
+
+def test_auto_backend_order_follows_cache_hint(tmp_path: Path) -> None:
+    save_backend_hint(0, "dshow", tmp_path)
+    src = DeviceSource(0, backend="auto", backend_cache_dir=tmp_path)
+    assert [name for name, _ in src._candidate_backends()] == ["dshow", "msmf"]
+
+
+def test_explicit_backend_ignores_cache_hint(tmp_path: Path) -> None:
+    save_backend_hint(0, "dshow", tmp_path)
+    src = DeviceSource(0, backend="msmf", backend_cache_dir=tmp_path)
+    assert [name for name, _ in src._candidate_backends()] == ["msmf"]
 
 
 def test_stop_before_start_is_safe() -> None:

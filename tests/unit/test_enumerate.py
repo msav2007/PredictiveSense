@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from predictivesense.camera import enumerate as enum_mod
-from predictivesense.camera.enumerate import as_api_rows, enumerate_devices
+from predictivesense.camera.enumerate import (
+    as_api_rows,
+    enumerate_devices,
+    load_backend_hint,
+    save_backend_hint,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -70,3 +78,35 @@ def test_monkeypatched_pygrabber_names_are_used(monkeypatch: pytest.MonkeyPatch)
         max_index=1, probe=lambda i, h: (True, "msmf"), name_resolver=None
     )
     assert [i.label for i in infos] == ["Fake Cam A", "Fake Cam B"]
+
+
+# -- Phase 1.5: per-device winning-backend cache ----------------------
+
+
+def test_backend_hint_absent_cache_returns_none(tmp_path: Path) -> None:
+    assert load_backend_hint(0, tmp_path) is None
+
+
+def test_backend_hint_roundtrip_and_merge(tmp_path: Path) -> None:
+    save_backend_hint(0, "dshow", tmp_path)
+    save_backend_hint(1, "msmf", tmp_path)
+    assert load_backend_hint(0, tmp_path) == "dshow"
+    assert load_backend_hint(1, tmp_path) == "msmf"
+    # merge, not overwrite
+    save_backend_hint(0, "msmf", tmp_path)
+    assert load_backend_hint(0, tmp_path) == "msmf"
+    assert load_backend_hint(1, tmp_path) == "msmf"
+
+
+def test_backend_hint_rejects_junk(tmp_path: Path) -> None:
+    save_backend_hint(0, "not-a-backend", tmp_path)
+    assert load_backend_hint(0, tmp_path) is None
+    (tmp_path / "camera_backends.json").write_text("{ not json", encoding="utf-8")
+    assert load_backend_hint(0, tmp_path) is None
+
+
+def test_backend_hint_ignores_unknown_cached_value(tmp_path: Path) -> None:
+    (tmp_path / "camera_backends.json").write_text(
+        json.dumps({"0": "v4l2"}), encoding="utf-8"
+    )
+    assert load_backend_hint(0, tmp_path) is None

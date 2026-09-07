@@ -403,6 +403,7 @@ def build_camera_source(config: AppConfig) -> FrameSource:
             open_timeout_s=config.capture.open_timeout_s,
             reconnect_initial_s=config.capture.reconnect_initial_s,
             reconnect_max_s=config.capture.reconnect_max_s,
+            backend_cache_dir=config.results_dir,
         )
 
     if kind is SourceKind.FILE:

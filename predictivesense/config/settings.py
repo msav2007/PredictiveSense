@@ -116,11 +116,18 @@ class CaptureConfig(_Section):
     open_timeout_s: float = Field(gt=0, default=5.0)
     reconnect_initial_s: float = Field(gt=0, default=0.5)
     reconnect_max_s: float = Field(gt=0, default=8.0)
+    # Analysis path defaults chosen from the Phase 1.5 sweep
+    # (results/analysis_sweep_loopback.md): 10 fps / 640x480 / q0.70 minimises
+    # frame age and drops at acceptable quality - not the highest numbers.
     analysis_fps: float = Field(gt=0, default=10.0)
     analysis_width: int = Field(gt=0, default=640)
     analysis_height: int = Field(gt=0, default=480)
     analysis_jpeg_quality: float = Field(gt=0.0, le=1.0, default=0.7)
     max_ingest_message_bytes: int = Field(gt=0, default=2_000_000)
+    # Worker backpressure ceiling: before sending an analysis frame the worker
+    # checks socket.bufferedAmount and skips (never queues) the frame when it
+    # exceeds this. The direct fix for frame age creeping upward under load.
+    max_ws_buffered_bytes: int = Field(gt=0, default=1_000_000)
 
     @field_validator("fourcc")
     @classmethod

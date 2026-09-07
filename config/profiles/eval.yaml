@@ -38,17 +38,21 @@ capture:
   request_width: 1280
   request_height: 720
   request_fps: 30
+  # See results/camera_matrix_integrated.md (Phase 1.5). Defaults unchanged -
+  # measured optimal for the integrated camera.
   fourcc: auto
   buffer_size: 1
   warmup_frames: 0
   open_timeout_s: 5.0
   reconnect_initial_s: 0.5
   reconnect_max_s: 8.0
+  # Analysis-path defaults from results/analysis_sweep_loopback.md (Phase 1.5).
   analysis_fps: 10
   analysis_width: 640
   analysis_height: 480
   analysis_jpeg_quality: 0.7
   max_ingest_message_bytes: 2000000
+  max_ws_buffered_bytes: 1000000
 
 recorder:
   enabled: false

@@ -217,3 +217,115 @@ Recorded in full in `docs/decisions.md` (Phase 1 section). The load-bearing ones
 - `capture.owner` cannot be *proven* mutually exclusive server-side (the backend simply never opens a device when `owner=browser`, and `/ws/ingest` refuses connections when `owner=backend`). Confirm the by-construction enforcement is sufficient.
 - The stray untracked `phase0.md` at the repo root (a duplicate of `docs/phase-reports/phase0.md`) was removed for a clean tree. Say if it should have been kept.
 - Six physical checks in §2 remain. No other ambiguity was hit.
+
+---
+
+# Phase 1.5 — camera/input optimization & verification (closing pass on Phase 1)
+
+**Date:** 2026-09-07 (UTC), same machine as §1 (`Windows-10-10.0.26200-SP0`, Intel Core Ultra 5 125H, integrated Intel Arc GPU, **no NVIDIA / no CUDA**, Python 3.11.9 `.venv`). This is the closing pass on Phase 1 — **Phase 2 not started, no Phase 2 file created.** `pytest -q`: **127 passed, 1 skipped** (was 107/1; +20 tests).
+
+New scripts: `scripts/benchmark_camera_matrix.py` (backend-owned matrix), `scripts/benchmark_analysis_path.py` (in-process analysis-path sweep). New tests: `tests/unit/test_worker_backpressure_contract.py`, `tests/integration/test_camera_recovery.py`, plus additions to `test_capture_config.py` / `test_enumerate.py` / `test_device_source.py` / `test_api.py`. Config: `capture.max_ws_buffered_bytes` (default `1_000_000`); `config/benchmarked_camera_combos.json` (committed grid). Result files land under `results/` (git-ignored per `results/*`).
+
+## Part A — Measured
+
+### A1. Camera matrix — Integrated Camera (index 0), backend-owned, 10 s/combo
+
+`req` = requested, `got` = the value the device actually returned. Every combo opened; **0 read failures and 0 reconnects on every row.**
+
+| req res | got res | req fps | got fps (rep) | meas fps | backend | fourcc used | interval p50/p95/max ms | TTFF s | CPU % | RSS Δ (one-time) MB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 640×480 | 640×480 | 30 | 30.0 | 29.23 | msmf | raw:22 | 32.04 / 48.99 / 80.44 | 0.016 | 7.7 | 73.8 |
+| 640×480 | 640×480 | 30 | 30.0 | 29.19 | msmf | raw:22 (MJPG req) | 32.08 / 49.94 / 81.72 | 0.031 | 9.5 | 8.4 |
+| 640×480 | 640×480 | 30 | 30.00003 | 28.89 | dshow | YUY2 | 32.03 / 48.21 / 48.97 | 0.031 | 6.4 | — |
+| 640×480 | 640×480 | 30 | 30.00003 | 28.89 | dshow | YUY2 (MJPG req) | 32.09 / 48.12 / 48.90 | 0.032 | 7.9 | 8.6 |
+| 1280×720 | 1280×720 | 30 | 30.0 | 29.22 | msmf | raw:22 | 32.11 / 48.64 / 80.82 | 0.031 | 24.6 | 58.2 |
+| 1280×720 | 1280×720 | 30 | 30.0 | 29.23 | msmf | raw:22 (MJPG req) | 32.14 / 49.81 / 81.65 | 0.031 | 25.7 | 9.6 |
+| 1280×720 | 1280×720 | 30 | 30.00003 | 29.61 | dshow | YUY2 | 32.16 / 48.12 / 52.10 | 0.032 | 16.5 | — |
+| 1280×720 | 1280×720 | 30 | 30.00003 | 28.83 | dshow | YUY2 (MJPG req) | 32.40 / 47.74 / 51.68 | 0.032 | 26.5 | 8.9 |
+| 1920×1080 | 1920×1080 | 30 | 30.0 | 29.22 | msmf | raw:22 | 31.04 / 61.45 / 77.97 | 0.031 | 52.0 | 89.2 |
+| 1920×1080 | 1920×1080 | 30 | 30.0 | 29.14 | msmf | raw:22 (MJPG req) | 31.01 / 61.72 / 92.61 | 0.016 | 39.7 | 12.7 |
+| 1920×1080 | 1920×1080 | 30 | 30.00003 | 28.89 | dshow | YUY2 | 32.23 / 48.06 / 55.66 | 0.016 | 43.2 | — |
+| 1920×1080 | 1920×1080 | 30 | 30.00003 | 28.83 | dshow | YUY2 (MJPG req) | 32.31 / 48.28 / 53.81 | 0.032 | 40.8 | 18.9 |
+
+*(negative RSS Δ rows = the process shed the previous combo's one-time camera-open allocation; RSS is stable across a run, see §1b.)*
+
+- **Requested == achieved** for resolution and reported FPS in every row. Measured FPS is ~29.2 (the benchmark read-loop's ~0.6 fps overhead, not camera drops).
+- **FOURCC = MJPG is a no-op on both backends here.** MSMF reads `CAP_PROP_FOURCC` back as `raw:22`; **DSHOW reads it back as `YUY2`** even when MJPG was requested. Timing is byte-identical to `auto`. → `capture.fourcc` stays `auto`.
+- **`CAP_PROP_BUFFERSIZE = 1` kept** (default). DSHOW max interval 49–56 ms vs MSMF's 78–93 ms occasional hitch.
+- **Winning backend for index 0 = `dshow`** (median p95 ~48 ms vs MSMF ~49–62 ms, lower CPU at 720p/1080p, same 29 fps, 0 drops). Written to `results/camera_backends.json`; `DeviceSource(backend="auto", backend_cache_dir=results_dir)` now opens it first and still falls back to MSMF. Verified end-to-end: a backend-owned `build_camera_source` run opened **dshow** at 1280×720@30, `capture_fps` 29.7, 0 read failures, not stale.
+
+### A2. Analysis-path sweep — in-process loopback, 6 s/combo (27 combos)
+
+Backend half only: real `BrowserSource → LatestFrameMailbox → AnalysisLoop`, synthetic camera-like frames at the target rate, RTT ≈ 0. `encode ms (proxy)` = `cv2.imencode` here, **not** the browser worker's `convertToBlob`.
+
+| req fps | size | quality | age p50 ms | age p95 ms | drop rate | decode ms p50 | enc proxy ms p50 | ingest B/s | CPU % |
+|---|---|---|---|---|---|---|---|---|---|
+| 5 | 480×360 | 0.50 | 25.2 | 34.7 | 0.000 | 0.77 | 1.88 | 53 735 | 3.4 |
+| 5 | 480×360 | 0.70 | 39.9 | 49.2 | 0.000 | 0.93 | 2.15 | 91 401 | 2.0 |
+| 5 | 480×360 | 0.85 | 38.7 | 53.6 | 0.000 | 1.85 | 3.24 | 170 595 | 2.8 |
+| 5 | 640×480 | 0.50 | 30.1 | 42.7 | 0.000 | 2.57 | 5.14 | 82 717 | 4.6 |
+| 5 | 640×480 | 0.70 | 41.6 | 51.1 | 0.000 | 1.47 | 3.41 | 149 395 | 3.1 |
+| 5 | 640×480 | 0.85 | 34.2 | 44.7 | 0.000 | 3.94 | 6.17 | 292 714 | 6.1 |
+| 5 | 800×600 | 0.50 | 28.5 | 30.3 | 0.000 | 4.74 | 8.43 | 131 982 | 7.4 |
+| 5 | 800×600 | 0.70 | 27.7 | 35.1 | 0.000 | 5.31 | 8.24 | 235 061 | 7.1 |
+| 5 | 800×600 | 0.85 | 20.4 | 31.8 | 0.000 | 6.00 | 9.06 | 456 273 | 8.5 |
+| 10 | 480×360 | 0.50 | 42.1 | 55.1 | 0.000 | 1.66 | 3.05 | 102 910 | 6.4 |
+| 10 | 480×360 | 0.70 | 28.9 | 48.5 | 0.000 | 1.83 | 3.39 | 172 379 | 3.6 |
+| 10 | 480×360 | 0.85 | 35.0 | 50.1 | 0.000 | 2.20 | 3.67 | 328 008 | 9.7 |
+| 10 | 640×480 | 0.50 | 21.5 | 41.4 | 0.000 | 2.78 | 5.49 | 156 999 | 8.3 |
+| **10** | **640×480** | **0.70** | **37.4** | **50.5** | **0.000** | **3.15** | **5.47** | **286 119** | **9.2** |
+| 10 | 640×480 | 0.85 | 22.7 | 37.1 | 0.000 | 3.69 | 5.89 | 548 785 | 8.8 |
+| 10 | 800×600 | 0.50 | 18.9 | 37.5 | 0.000 | 4.81 | 7.79 | 250 517 | 12.7 |
+| 10 | 800×600 | 0.70 | 27.6 | 43.1 | 0.000 | 5.21 | 8.25 | 446 108 | 12.7 |
+| 10 | 800×600 | 0.85 | 57.5 | 74.6 | 0.000 | 6.18 | 9.29 | 866 657 | 16.2 |
+| 15 | 480×360 | 0.50 | 30.6 | 54.5 | 0.000 | 1.54 | 3.20 | 148 160 | 13.5 |
+| 15 | 480×360 | 0.70 | 43.2 | 53.3 | 0.000 | 1.76 | 3.42 | 251 120 | 4.8 |
+| 15 | 480×360 | 0.85 | 29.0 | 56.3 | 0.000 | 2.08 | 3.51 | 478 910 | 8.2 |
+| 15 | 640×480 | 0.50 | 31.5 | 50.9 | 0.003 | 3.08 | 5.62 | 229 752 | 10.2 |
+| 15 | 640×480 | 0.70 | 31.9 | 58.8 | 0.000 | 3.41 | 5.89 | 415 516 | 18.0 |
+| 15 | 640×480 | 0.85 | 34.1 | 48.7 | 0.000 | 3.80 | 6.45 | 803 478 | 16.8 |
+| 15 | 800×600 | 0.50 | 33.8 | 48.8 | 0.000 | 2.83 | 5.23 | 369 656 | 14.8 |
+| 15 | 800×600 | 0.70 | 16.3 | 45.3 | 0.000 | 3.08 | 5.40 | 652 236 | 23.3 |
+| 15 | 800×600 | 0.85 | 26.3 | 48.1 | 0.000 | 3.55 | 6.00 | 1 274 991 | 17.0 |
+
+**Reading:** drop rate is ~0 everywhere (one 0.003 blip). In loopback, frame age is dominated by the 20 Hz consumer sampling phase (≈ 20–55 ms) and does **not** track the parameters — it is at the floor already. `decode_ms`, CPU and ingest bytes/s scale cleanly with resolution / fps / quality. **Defaults kept: `analysis_fps 10`, `640×480`, `q 0.70`** — no axis reduces frame age or drops, and each raises CPU (15 fps ≈ 2×) and/or bandwidth (q0.85 ≈ 2×); 480×360 saves little and drops spatial detail later phases need.
+
+### A3. Optimizations applied — before/after
+
+| change | before | after | measurement |
+|---|---|---|---|
+| Worker `bufferedAmount` skip | hard-coded `1_000_000` literal | `capture.max_ws_buffered_bytes` config, checked pre- and post-encode, `skipBackpressure` counter | `test_worker_backpressure_contract.py`: simulated 60 Hz arrivals / 30 fps cap / 40 ms encode → max 1 encode in flight, 0 queued, all drops carry a reason |
+| Worker newest-wins | `await encodeAndSend(frame)` inline in the read loop (implicit serialisation) | `encodeBusy` guard; `drawImage` sync then frame closed; `skipBusy` counter | same test; `framesIn === framesClosed` reported (`leaked` surfaced) |
+| `device_backend: auto` open cost | probe MSMF (timeout) then DSHOW every start | consult `results/camera_backends.json` first, hinted backend opens first | matrix picks `dshow` for index 0; `DeviceSource._candidate_backends` order test; live run opened `dshow` first |
+| Device switch | old track stopped, `srcObject` left set | `stopCurrentStream()` = worker terminate + `track.stop()` + `srcObject = null` **before** new `getUserMedia` | switch time now measured (see A4); no camera in the headless browser to time it here |
+| Preview-size change (same device) | full re-acquire | `track.applyConstraints()` | `#preview-size` selector wired; full re-acquire only on device change |
+
+### A4. Switch time, recovery time, final test run
+
+- **Switch time (integrated ↔ OnePlus, both directions):** instrumented in `app.js` (`change` event → first `requestVideoFrameCallback` on the new stream, shown as `switch ms`, POSTed in the browser-metrics sample). **Not measured here** — the Browser pane blocks camera access and the OnePlus virtual camera is not registered on this machine (see Part C). Awaiting the developer with both devices present.
+- **Recovery from device loss (automated):** `tests/integration/test_camera_recovery.py`.
+  - Fake source flipped unavailable mid-run: snapshot goes `stale=true` within the stale window, `loop.error is None`, both threads stay alive, snapshots keep emitting; on return, `stale=false` again in **< 2 s**, and the producer/consumer thread objects are unchanged (no restart).
+  - `DeviceSource` over a fake `cv2.VideoCapture` (burst → 3 failed reopens → healthy): the outage surfaces as `stale=true` through the loop and recovers automatically; `reconnects >= 1`; `loop.error is None`.
+- **Preview independence re-verified:** `tests/integration/test_preview_independence.py` still passes — a 3 s consumer stall never blocks the ingest socket or the producer, mailbox drops climb, depth stays ≤ 1.
+- **Recorded driver still byte-deterministic:** `tests/integration/test_recorded_driver.py::test_two_runs_produce_byte_identical_jsonl` still passes.
+- **Full suite:** `pytest -q` → **127 passed, 1 skipped, 1 warning** (the lone skip is `tests/hardware/test_device_source.py`; the warning is the pre-existing third-party `anyio` deprecation in `starlette.testclient`). `pytest -q -m "not slow"` → 122 passed, 1 skipped, 5 deselected.
+
+## Part B — Physically observed by the developer
+
+Verbatim, from Block 1 of the Phase 1.5 prompt (the developer's by-eye observations, taken during Phase 1; this pass changed no capture default that affects them):
+
+> - **Integrated Camera:** working, very smooth, very little noticeable latency. Currently the better-feeling source.
+> - **OnePlus Nord 4 via Windows virtual camera:** working, stable, usable. Only a very small, barely noticeable delay versus the integrated camera. No major lag or freezing.
+
+No number is attached to "barely noticeable delay" — it is the developer's by-eye impression, not an instrumented measurement.
+
+## Part C — Not verified / limitations
+
+- **No browser ran the camera path in this pass.** The Browser pane blocks `getUserMedia`. Everything browser-side — `track.getSettings()` requested-vs-achieved, preview FPS via `requestVideoFrameCallback`, real worker `convertToBlob` encode ms, `MediaStreamTrackProcessor` vs the `createImageBitmap` fallback, `ondevicechange` re-enumeration with a device physically appearing/disappearing, `applyConstraints` on a live track, and the **switch-time numbers both directions** — is implemented and unit-covered but needs the developer with both cameras. The dashboard page, the new "Browser measurement" panel, and `POST /api/metrics/browser` were verified to load and round-trip (sample written to `results/browser_metrics_<label>.json`).
+- **OnePlus virtual camera not registered.** A 0–9 MSMF+DSHOW sweep saw only the Integrated Camera (index 0), same as the Phase 1 pass. The OnePlus backend `DeviceSource` path (achieved FPS/latency, reconnect on a mid-run Phone Link drop) is unmeasured. Command for the developer while Phone Link streams: `python scripts\benchmark_camera_matrix.py --index <N> --label oneplus-vcam --seconds 10`.
+- **Phone Link virtual-camera latency is out of scope.** The phone-encode → wireless → Windows-virtual-camera pipeline is not part of PredictiveSense and cannot be reduced in this codebase. Virtual cameras also commonly ignore requested resolution / frame rate — the matrix reports requested-vs-achieved precisely so that is visible.
+- **Browser preview latency is the browser compositor** and is not measurable from Python.
+- **Loopback RTT ≈ 0.** The analysis-path frame-age numbers (A2) are single-process; a real browser↔backend link (Wi-Fi especially) adds RTT that is the true error bar on `frame_age_ms`.
+- **Analysis-sweep `encode ms` is a `cv2.imencode` proxy**, not the browser worker's `OffscreenCanvas.convertToBlob` time.
+- **`camera_backends.json` is machine-specific and not committed.** A fresh clone falls back to the historical MSMF-first probe order.
+- **No detection, pose, tracking, temporal state, risk model, alert policy, voice, or overlay drawing exists.** Unchanged from Phase 1. Nothing from Phase 2 has been started.

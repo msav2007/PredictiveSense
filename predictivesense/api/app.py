@@ -21,14 +21,19 @@ The app binds a local listening socket and makes no outbound connections.
 
 from __future__ import annotations
 
+import json
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from predictivesense import __version__
 from predictivesense.api import ingest as ingest_router
@@ -45,6 +50,14 @@ __all__ = ["create_app"]
 
 _LOG = get_logger(__name__)
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+_LABEL_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+class BrowserMetricsIn(BaseModel):
+    """Body of ``POST /api/metrics/browser``: a labelled measurement block."""
+
+    label: str = Field(default="browser", max_length=64)
+    sample: dict[str, Any]
 
 
 def create_app(
@@ -133,6 +146,37 @@ def create_app(
     async def api_debug_stall(seconds: float = 3.0) -> dict[str, object]:
         applied = analysis_loop.request_consumer_stall(seconds)
         return {"stalled_seconds": applied}
+
+    @app.post("/api/metrics/browser")
+    async def api_metrics_browser(body: BrowserMetricsIn) -> dict[str, object]:
+        """Append one labelled browser-measured sample block to results/.
+
+        The page pushes ``track.getSettings()`` (requested vs achieved),
+        preview / analysis FPS, worker encode ms, WS bufferedAmount, backend
+        decode ms, frame-age p50/p95, drop rate and switch times. Written to
+        ``results/browser_metrics_<label>.json`` as a JSON array.
+        """
+
+        slug = _LABEL_RE.sub("-", body.label)[:64] or "browser"
+        out = Path(config.results_dir) / f"browser_metrics_{slug}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        existing: list[Any] = []
+        if out.is_file():
+            try:
+                loaded = json.loads(out.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    existing = loaded
+            except ValueError:
+                existing = []
+        existing.append(
+            {
+                "received_utc": datetime.now(timezone.utc).isoformat(),
+                "sample": body.sample,
+            }
+        )
+        out.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        _LOG.info("browser metrics sample #%d -> %s", len(existing), out)
+        return {"ok": True, "path": str(out), "samples": len(existing)}
 
     @app.get("/")
     async def index() -> FileResponse:
