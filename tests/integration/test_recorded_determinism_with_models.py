@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from predictivesense.perception.engine import build_perception
+from predictivesense.perception.policy import RecognitionPolicy
 from predictivesense.pipeline.recorded import RecordedDriver
 
 pytestmark = [pytest.mark.integration, pytest.mark.models]
@@ -21,6 +22,23 @@ pytestmark = [pytest.mark.integration, pytest.mark.models]
 @pytest.fixture()
 def engine(require_models, perception_dev_config):
     return build_perception(perception_dev_config, strict=True, warmup=False)
+
+
+def test_two_runs_with_policy_are_byte_identical(engine, perception_dev_config, fixture_video, tmp_path) -> None:
+    """BLOCK 12.8: perception + policy is deterministic run-to-run."""
+
+    policy = RecognitionPolicy(perception_dev_config.policy)
+    r1 = RecordedDriver(results_dir=tmp_path / "a").run(
+        fixture_video, replay_mode="asfast", run_id="p", perception=engine, policy=policy
+    )
+    r2 = RecordedDriver(results_dir=tmp_path / "b").run(
+        fixture_video, replay_mode="asfast", run_id="p", perception=engine, policy=policy
+    )
+    assert Path(r1["jsonl_path"]).read_bytes() == Path(r2["jsonl_path"]).read_bytes()
+    # policy-annotated lines carry the additive fields; a no-policy run does not
+    body = Path(r1["jsonl_path"]).read_text(encoding="utf-8")
+    if '"detections":[{' in body.replace(" ", ""):
+        assert "policy_state" in body
 
 
 def test_two_runs_with_models_are_byte_identical(engine, fixture_video, tmp_path) -> None:

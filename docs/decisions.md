@@ -228,3 +228,118 @@ defined in Phase 0 for this. Full numbers in `docs/phase-reports/phase2.md`.
   developer's own `data/raw/` recording** (~55 KB each), committed so the
   `models`-marked pipeline test has real content (`person`, one `cup`). Pure
   synthetic images produce no detections and would make the test vacuous.
+
+## Phase 2.5 - recognition reliability & measurement (2026-09-08)
+
+Adds the project's first labelled evaluation set (from its own footage), an
+evaluation harness, and a recognition policy layer - all so the perception's
+reliability *in this room* can be stated with numbers. No tracking, temporal
+state, risk, or voice; no training or fine-tuning.
+
+- **Annotation store is COCO detection JSON** (`images`/`annotations`/
+  `categories`), in `predictivesense/dataset/coco_store.py`. Chosen so the same
+  files feed standard fine-tuning tooling in a later phase with **no conversion**
+  (COCO is what Ultralytics, Detectron2, MMDetection and the HF `object-detection`
+  pipeline all read). Per-image extras beyond stock COCO: `seeded` (bool - was the
+  frame detector-seeded during labelling), `labelled` (bool), and `ps_provenance`
+  (source clip, capture timestamp, session id, camera device, condition tags).
+  `CocoStore.save` writes a `.bak` before any overwrite (BLOCK 10). Categories are
+  `policy.domain_classes` in order, ids from 1.
+- **`Detection` gained four additive fields** (Phase 0 additive rule; no rename,
+  no reshape): `raw_class_name: str` (what the model said), `policy_state: str`
+  (`accepted` | `unknown_low_confidence` | `unknown_margin` |
+  `rejected_out_of_domain` | `rejected_size`), `runner_up: tuple[str, float] |
+  None` (second-best class for the anchor). `class_name` is unchanged in shape
+  and after the policy holds the decided label (possibly `"unknown"`). Every
+  pre-2.5 construction site is valid via defaults; the recorded-JSONL shape is
+  unchanged for a `perception=`-only run and only grows these keys when a
+  `policy=` is passed.
+- **"Do not modify the detector's inference behaviour" is read as: the set of
+  emitted detections and their `bbox` / `class_id` / `class_name` / `score`, and
+  the NMS + thresholding that produce them, are unchanged.** `perception/
+  detector.py` now *also* computes `raw_class_name` (mirrors `class_name`) and
+  `runner_up` (the anchor's second-highest class score, already in the head
+  output) as diagnostic metadata - additive, non-behavioural. Evidence it is
+  non-behavioural: every Phase 2 `models`-marked test (detector validity,
+  recorded determinism, person-detected) stays green byte-for-byte. Without this
+  the Block 3.13 top-2 margin rule would be permanently inert in production.
+- **YOLOX decode variant added, YOLO11 path untouched.** `DetectorConfig.decode`
+  (`"yolo"` default | `"yolox"`). The `yolox` branch uses a raw-BGR, no-`/255`,
+  top-left letterbox (`preprocess.letterbox` gained `to_rgb` / `scale` / `center`
+  params, all defaulting to the YOLO convention) and `postprocess.yolox_decode`
+  (grid decode for strides 8/16/32). This is the "adding a decode variant if
+  needed" that BLOCK 3.18 anticipates.
+- **Splits are session-disjoint, never frame-disjoint** (`dataset/splits.py`).
+  Whole recording sessions go to `val` or `test`; a content hash over
+  images+annotations+assignment lets `load_splits` refuse a stale split (BLOCK
+  10). A leakage assertion (`assert_no_leakage`) is run on every build and load,
+  and a test builds a deliberately leaky split and confirms it is rejected.
+- **Thresholds and `margin_min` are fitted on `val` only** by
+  `scripts/fit_thresholds.py` (best-F1 over a 0.05 grid per class, ties toward
+  precision; `margin_min` = 10th-percentile of `score - runner_up` over correct
+  detections). `test` is opened once, at the end, via
+  `scripts/eval_detection.py --split test`, which appends the opening (date +
+  `--reason`) to `results/test_set_openings.md` and refuses a second opening
+  without `--allow-reopen`.
+- **`policy.default_threshold` (0.35) is an explicit fallback, not a fitted
+  value** - a judgement call, flagged here. It applies only to a class with no
+  `val` support to fit from. `min_box_area_frac` (0.0005) and `margin_min` (0.10)
+  ship at their prompt-suggested defaults until the developer's `val` labels
+  allow `fit_thresholds.py` to replace them; the profile comment names
+  `results/fit_thresholds_val.md`. `aspect_ratio_bounds` is empty by default
+  (per-class, opt-in) - also a judgement call.
+- **`domain_classes` is validated against COCO-80 at config load** (BLOCK 10 - a
+  `domain_classes` entry the shipped model cannot emit fails loudly). This
+  couples `config/settings.py` to `perception/classes.COCO_CLASSES`, which is
+  stdlib-only, so no import cycle.
+- **The policy runs in `pipeline/loop.py` and `pipeline/recorded.py`**, after
+  `PerceptionEngine.infer`, before the snapshot / JSONL line. Built from
+  `config.policy` by `build_loop`; `app.state.policy` is shared with
+  `POST /api/analyze` so recorded runs apply the identical code. `policy.apply`
+  never raises into the loop (it catches its own errors, counts the frame as a
+  failure, passes detections through). New `StateSnapshot.metrics` keys
+  (`policy_accepted`, `policy_unknown_*`, `policy_rejected_*`, `policy_errors`,
+  `policy_ms`, `policy_ms_p95`) - keys only, map stays `dict[str, float]`.
+- **Pose gating: `perception.pose_requires_person` (default false).** When true,
+  pose runs on a sampled frame only if the detector found a `person` (still also
+  subject to `pose_every_n`). Handled in `engine.infer` (where both models run);
+  measured before/after in the phase report. Default off - it is only turned on
+  if the measurement shows it helps on this machine without losing skeletons.
+- **ORT thread options set explicitly** (`perception/runtime.py`):
+  `inter_op_num_threads = 1`, `execution_mode = ORT_SEQUENTIAL`, `intra_op`
+  swept. Confirms Phase 2's `intra_op_threads: 6` knee.
+- **Detector input size stays 640.** BLOCK 3.5.21 says "adopt the measured-best
+  input size from the Phase 2 sweep"; that sweep's *conclusion*
+  (`results/input_size_sweep.md`) was 640 (small-object sensitivity), with 480
+  the documented fallback. No labelled evidence yet supports changing it, so 640
+  is retained and 480 remains the fallback.
+- **Alternative model: Megvii YOLOX-tiny (Apache-2.0), evaluated on the identical
+  set.** Fetched + SHA-256-verified by `scripts/fetch_models.py` (added to
+  `models/manifest.json`; `models/*.onnx` still git-ignored). The AGPL-3.0
+  licence decision and its evidence are in `docs/attribution.md` /
+  `results/model_comparison.md`.
+- **Labelling tool is a standalone page at `/label`** (`static/label/`), not part
+  of the Phase 1.6 shell - it is a research tool. It talks to
+  `predictivesense/api/labels.py` (`GET/POST /api/labels/...`). Optional
+  detector-assisted seeding runs the loop's detector via a new
+  `camera/_opencv.read_image_bgr` helper (keeps `cv2` out of the API layer) and
+  is always recorded per image as `seeded`.
+- **`research` group registered** (`static/groups/research.js`, order 70) - the
+  slot reserved in Phase 1.6, filled exactly as Phase 2 filled `analysis`:
+  `constants.js` moved `research` out of `RESERVED_GROUP_IDS` (only `alerts`
+  remains). `test_ui_structure.py` updated to expect it (same precedent).
+- **Policy UI controls are per-viewer overlay presentation** (`features/
+  policy.js`), like `analysis-prefs.js` - they re-derive from the additive
+  `Detection` fields already on the snapshot, so **no API route** was added. The
+  authoritative policy switches are `config.policy`, shown read-only under
+  Analysis -> Detection. `unknown` renders dashed, muted, labelled `Unknown` and
+  keeps its box (BLOCK 3.14).
+- **`data/eval/` is git-ignored** (under `data/**`), like `data/raw/` - frames
+  and `annotations.json` never enter git. `results/test_set_openings.md` and
+  `results/model_comparison.md` are the two `results/` files that *are* tracked
+  (gitignore exceptions) because they are audit records, not derived metrics.
+- **No new runtime dependency.** `predictivesense/dataset/` and
+  `predictivesense/eval/` are stdlib + numpy only; the import guard
+  (`test_no_forbidden_imports.py`) is unchanged and still passes (`cv2` /
+  `onnxruntime` stay scoped to `camera/` + `perception/`; the eval *scripts*
+  that need `cv2.imread` live in `scripts/`, outside the scanned package).

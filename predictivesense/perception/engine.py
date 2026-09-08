@@ -40,6 +40,7 @@ class PerceptionEngine:
         self._frame_counter = -1
         self._detector_failures = 0
         self._pose_failures = 0
+        self._pose_gated_skips = 0  # pose skipped: pose_requires_person, no person
 
         threads = config.intra_op_threads
         if config.detection_enabled:
@@ -95,7 +96,13 @@ class PerceptionEngine:
                 notes.append(f"detector: {exc!r}")
                 _LOG.warning("detector inference failed on frame %s: %r", frame.frame_id, exc)
 
-        if self._pose is not None and (idx % self._config.pose_every_n == 0):
+        pose_due = self._pose is not None and (idx % self._config.pose_every_n == 0)
+        if pose_due and self._config.pose_requires_person:
+            has_person = any(d.class_name == "person" for d in detections)
+            if not has_person:
+                pose_due = False
+                self._pose_gated_skips += 1
+        if pose_due:
             pose_ran = True
             t0 = time.perf_counter()
             try:
@@ -125,6 +132,8 @@ class PerceptionEngine:
             "pose_enabled": self._pose is not None,
             "provider": self._config.provider,
             "pose_every_n": self._config.pose_every_n,
+            "pose_requires_person": self._config.pose_requires_person,
+            "pose_gated_skips": self._pose_gated_skips,
             "detector_failures": self._detector_failures,
             "pose_failures": self._pose_failures,
         }

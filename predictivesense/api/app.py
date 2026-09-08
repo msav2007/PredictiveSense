@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from predictivesense import __version__
 from predictivesense.api import ingest as ingest_router
+from predictivesense.api import labels as labels_router
 from predictivesense.api import recorder as recorder_router
 from predictivesense.api import videos as videos_router
 from predictivesense.api.broadcast import Broadcaster, serve_state_client
@@ -121,6 +122,9 @@ def create_app(
     # code and do not re-create ONNX sessions per request. None when perception is
     # disabled or its weights are absent (then recorded output is the Phase 1.6 shape).
     app.state.perception = analysis_loop.perception
+    # The recognition policy (Phase 2.5) - shared with POST /api/analyze so
+    # recorded runs apply the identical policy code.
+    app.state.policy = analysis_loop.policy
     app.state.session_id = uuid.uuid4().hex
     app.state.ingest_stats = {
         "frames": 0.0,
@@ -133,6 +137,7 @@ def create_app(
     app.include_router(ingest_router.router)
     app.include_router(recorder_router.router)
     app.include_router(videos_router.router)
+    app.include_router(labels_router.router)
     if _STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
@@ -192,6 +197,12 @@ def create_app(
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(_STATIC_DIR / "index.html", media_type="text/html")
+
+    @app.get("/label")
+    async def label_page() -> FileResponse:
+        """The Phase 2.5 labelling tool (linked from the Research group)."""
+
+        return FileResponse(_STATIC_DIR / "label" / "index.html", media_type="text/html")
 
     @app.websocket("/ws/state")
     async def ws_state(websocket: WebSocket) -> None:

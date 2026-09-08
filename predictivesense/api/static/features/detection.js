@@ -11,6 +11,7 @@ import { runtime } from "/static/features/runtime.js";
 import { el, settingRow } from "/static/ui/controls.js";
 import { fmtNum } from "/static/ui/format.js";
 import { isLayerEnabled, setLayerEnabled, onLayerChange } from "/static/features/analysis-prefs.js";
+import { isPolicyView, setPolicyView, activeThresholds } from "/static/features/policy.js";
 
 export const id = "detection";
 export const title = "Detection";
@@ -50,8 +51,41 @@ export function render(body) {
       "Low-confidence band",
       Array.isArray(cfg.low_confidence_band) ? cfg.low_confidence_band.join(" – ") : "—",
     ),
+  );
+
+  // -- Phase 2.5 recognition policy controls -------------------------
+  const pol = runtime.config?.policy || {};
+  body.append(el("p", { class: "subhead", text: "Recognition policy" }));
+  body.append(
+    policyToggle("Policy", "policy"),
+    policyToggle("Domain restriction", "domain"),
+    policyToggle("Top-2 margin rule", "margin"),
+    roRow("Backend policy", pol.enabled === false ? "off (config)" : "on (config)"),
+    roRow("Domain classes", (pol.domain_classes || []).length + " classes"),
+    roRow("Default threshold", pol.default_threshold != null ? String(pol.default_threshold) : "—"),
+    roRow("Margin min", pol.margin_min != null ? String(pol.margin_min) : "—"),
+    roRow("Min box area frac", pol.min_box_area_frac != null ? String(pol.min_box_area_frac) : "—"),
+  );
+  const thr = activeThresholds();
+  const perClass = Object.entries(thr).filter(
+    ([, v]) => v !== (pol.default_threshold ?? 0.35),
+  );
+  body.append(
+    roRow(
+      "Per-class thresholds",
+      perClass.length
+        ? perClass.map(([k, v]) => `${k}:${v}`).join(", ")
+        : "none fitted yet (uses default)",
+    ),
     el("p", { class: "summary-line", id: "am-live-detection", text: "—" }),
   );
+}
+
+function policyToggle(label, id) {
+  const box = el("input", { type: "checkbox", id: `policy-${id}` });
+  box.checked = isPolicyView(id);
+  box.addEventListener("change", () => setPolicyView(id, box.checked));
+  return settingRow(label, box);
 }
 
 export function update(state) {

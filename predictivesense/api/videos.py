@@ -70,12 +70,14 @@ async def analyze(request: Request, body: AnalyzeRequest) -> dict[str, object]:
 
     driver = RecordedDriver(results_dir=config.results_dir)
     perception = getattr(request.app.state, "perception", None)
+    policy = getattr(request.app.state, "policy", None)
     try:
         result = driver.run(
             target,
             replay_mode=replay_mode,
             config_profile=config.profile,
             perception=perception,
+            policy=policy,
         )
     except (RuntimeError, OSError) as exc:
         _LOG.error("recorded analysis failed for %s: %r", target, exc)

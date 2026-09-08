@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PredictiveSense — Labelling</title>
+  <style>
+    :root {
+      --bg: #0b1220; --panel: #131c2e; --line: #26324a; --ink: #e7edf7;
+      --muted: #9fb0cc; --accent: #5b9dff; --danger: #ff6b6b; --ok: #4ade80;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+    header {
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+      padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
+      position: sticky; top: 0; z-index: 5;
+    }
+    header .grow { flex: 1; }
+    button {
+      font: inherit; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line);
+      background: #1c2942; color: var(--ink); cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); color: #06101f; border-color: var(--accent); font-weight: 600; }
+    button.danger { border-color: var(--danger); color: var(--danger); }
+    .pill { padding: 2px 8px; border-radius: 999px; background: #1c2942; border: 1px solid var(--line); color: var(--muted); }
+    .pill.on { color: var(--ok); border-color: var(--ok); }
+    main { display: grid; grid-template-columns: 1fr 240px; gap: 12px; padding: 12px; }
+    #stage { position: relative; background: #05080f; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+    #canvas { display: block; width: 100%; height: auto; cursor: crosshair; touch-action: none; }
+    aside { display: flex; flex-direction: column; gap: 8px; }
+    .cls { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
+    .cls:hover { background: #1c2942; }
+    .cls.active { border-color: var(--accent); background: #1c2942; }
+    .cls .key { font: 12px ui-monospace, monospace; color: var(--muted); width: 18px; text-align: center; }
+    .cls .swatch { width: 12px; height: 12px; border-radius: 3px; }
+    .hint { color: var(--muted); font-size: 12px; }
+    #boxlist { border-top: 1px solid var(--line); margin-top: 6px; padding-top: 6px; max-height: 30vh; overflow: auto; }
+    #boxlist .row { display: flex; justify-content: space-between; gap: 6px; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+    #boxlist .row.sel { background: #1c2942; }
+    #status { min-height: 18px; color: var(--muted); }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Labelling</strong>
+    <button id="prev">&larr; Prev (p)</button>
+    <button id="next">Next &rarr; (n)</button>
+    <button id="save" class="primary">Save &amp; next (S)</button>
+    <span class="pill" id="pos">— / —</span>
+    <span class="pill" id="sess">session —</span>
+    <span class="pill" id="seededpill">unseeded</span>
+    <span class="pill" id="donepill">not done</span>
+    <span class="grow"></span>
+    <button id="seed">Seed from detector (e)</button>
+    <button id="clear" class="danger">Delete all boxes</button>
+    <a href="/">&larr; dashboard</a>
+  </header>
+  <main>
+    <div id="stage"><canvas id="canvas" width="1280" height="720"></canvas></div>
+    <aside>
+      <div class="hint">Click a class, then drag on the image to draw. Drag a box to move, drag a corner to resize. Select a box and press its class key to relabel, or Delete to remove.</div>
+      <div id="palette"></div>
+      <label class="hint"><input type="checkbox" id="seededchk" /> mark this frame as detector-seeded</label>
+      <div id="boxlist"></div>
+      <div id="status"></div>
+      <div class="hint">Shortcuts: n/&rarr; save+next · p/&larr; prev · e seed · Del delete box · d toggle done</div>
+    </aside>
+  </main>
+  <script src="/static/label/label.js" type="module"></script>
+</body>
+</html>

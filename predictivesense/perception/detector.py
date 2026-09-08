@@ -18,7 +18,11 @@ from predictivesense.config.settings import DetectorConfig
 from predictivesense.core.types import Detection, Frame
 from predictivesense.logging_setup import get_logger
 from predictivesense.perception.classes import COCO_CLASSES
-from predictivesense.perception.postprocess import class_aware_nms, xywh_to_xyxy
+from predictivesense.perception.postprocess import (
+    class_aware_nms,
+    xywh_to_xyxy,
+    yolox_decode,
+)
 from predictivesense.perception.preprocess import letterbox, scale_boxes_to_original
 from predictivesense.perception.runtime import SessionHandle, create_session
 
@@ -42,6 +46,7 @@ class ObjectDetector:
     ) -> None:
         self._config = config
         self._input_size = int(config.input_size)
+        self._decode = str(getattr(config, "decode", "yolo"))
         self._handle: SessionHandle = create_session(
             config.model_path,
             provider=provider,
@@ -95,17 +100,34 @@ class ObjectDetector:
 
         image = frame.image
         orig_h, orig_w = int(image.shape[0]), int(image.shape[1])
-        lb = letterbox(image, self.input_size)
 
-        out = self._handle.session.run(None, {self._handle.input_name: lb.blob})[0]
-        # (1, 4 + num_classes, anchors) -> (anchors, 4 + num_classes)
-        preds = np.asarray(out[0], dtype=np.float64).T
-        num_classes = preds.shape[1] - 4
-        boxes_xywh = preds[:, :4]
-        cls_scores = preds[:, 4 : 4 + num_classes]
+        if self._decode == "yolox":
+            lb = letterbox(image, self.input_size, to_rgb=False, scale=1.0, center=False)
+            out = self._handle.session.run(None, {self._handle.input_name: lb.blob})[0]
+            decoded = yolox_decode(np.asarray(out[0], dtype=np.float64), self.input_size)
+            boxes_xywh = decoded[:, :4]
+            obj = decoded[:, 4:5]
+            cls_scores = decoded[:, 5:] * obj  # obj * class prob
+        else:
+            lb = letterbox(image, self.input_size)
+            out = self._handle.session.run(None, {self._handle.input_name: lb.blob})[0]
+            # (1, 4 + num_classes, anchors) -> (anchors, 4 + num_classes)
+            preds = np.asarray(out[0], dtype=np.float64).T
+            num_classes = preds.shape[1] - 4
+            boxes_xywh = preds[:, :4]
+            cls_scores = preds[:, 4 : 4 + num_classes]
 
+        num_classes = cls_scores.shape[1]
         class_ids = cls_scores.argmax(axis=1)
         confidences = cls_scores.max(axis=1)
+        # second-best class per anchor (diagnostic metadata only - the primary
+        # class, box and score are unchanged; see docs/decisions.md).
+        if num_classes >= 2:
+            runner_ids = _second_argmax(cls_scores)
+            runner_scores = cls_scores[np.arange(cls_scores.shape[0]), runner_ids]
+        else:
+            runner_ids = np.zeros(cls_scores.shape[0], dtype=np.int64)
+            runner_scores = np.zeros(cls_scores.shape[0], dtype=np.float64)
 
         lut = self._conf_lut if num_classes == self._conf_lut.shape[0] else None
         thr = lut[class_ids] if lut is not None else self._config.default_conf
@@ -116,13 +138,17 @@ class ObjectDetector:
         boxes_xywh = boxes_xywh[keep_mask]
         class_ids = class_ids[keep_mask]
         confidences = confidences[keep_mask]
+        runner_ids = runner_ids[keep_mask]
+        runner_scores = runner_scores[keep_mask]
 
         if confidences.shape[0] > _NMS_CANDIDATE_CAP:
             top = np.argpartition(confidences, -_NMS_CANDIDATE_CAP)[-_NMS_CANDIDATE_CAP:]
-            boxes_xywh, class_ids, confidences = (
+            boxes_xywh, class_ids, confidences, runner_ids, runner_scores = (
                 boxes_xywh[top],
                 class_ids[top],
                 confidences[top],
+                runner_ids[top],
+                runner_scores[top],
             )
 
         boxes_xyxy = xywh_to_xyxy(boxes_xywh)
@@ -139,18 +165,21 @@ class ObjectDetector:
         mapped = scale_boxes_to_original(boxes_xyxy[kept], lb, orig_w, orig_h)
         kept_class_ids = class_ids[kept]
         kept_scores = confidences[kept]
+        kept_runner_ids = runner_ids[kept]
+        kept_runner_scores = runner_scores[kept]
 
         detections: list[Detection] = []
-        for row, cid, score in zip(mapped, kept_class_ids, kept_scores):
+        for row, cid, score, rid, rscore in zip(
+            mapped, kept_class_ids, kept_scores, kept_runner_ids, kept_runner_scores
+        ):
             x1, y1, x2, y2 = (float(v) for v in row)
             if x2 <= x1 or y2 <= y1:
                 continue
             cid_int = int(cid)
-            name = (
-                self._class_names[cid_int]
-                if 0 <= cid_int < len(self._class_names)
-                else str(cid_int)
-            )
+            name = self._name_for(cid_int)
+            runner_up = None
+            if num_classes >= 2:
+                runner_up = (self._name_for(int(rid)), float(rscore))
             detections.append(
                 Detection(
                     bbox=(x1, y1, x2, y2),
@@ -158,9 +187,29 @@ class ObjectDetector:
                     class_name=name,
                     score=float(score),
                     frame_id=frame.frame_id,
+                    raw_class_name=name,
+                    runner_up=runner_up,
                 )
             )
         return detections
+
+    def _name_for(self, class_id: int) -> str:
+        return (
+            self._class_names[class_id]
+            if 0 <= class_id < len(self._class_names)
+            else str(class_id)
+        )
+
+
+def _second_argmax(scores: np.ndarray) -> np.ndarray:
+    """Index of the second-largest value in each row of ``(N, C)``."""
+
+    if scores.shape[1] < 2:
+        return np.zeros(scores.shape[0], dtype=np.int64)
+    part = np.argpartition(scores, -2, axis=1)[:, -2:]
+    rows = np.arange(scores.shape[0])[:, None]
+    ordered = part[rows, np.argsort(scores[rows, part], axis=1)]
+    return ordered[:, 0]  # the smaller of the top two = runner-up
 
 
 def _read_class_names(handle: SessionHandle) -> tuple[str, ...] | None:

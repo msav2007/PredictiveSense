@@ -23,6 +23,7 @@ from predictivesense.core.enums import SourceKind
 from predictivesense.core.types import Detection, Pose, StateSnapshot
 from predictivesense.logging_setup import get_logger
 from predictivesense.perception.engine import PerceptionEngine, build_perception
+from predictivesense.perception.policy import RecognitionPolicy
 from predictivesense.telemetry.metrics import MetricRegistry
 
 __all__ = ["AnalysisLoop", "build_loop", "build_camera_source"]
@@ -48,14 +49,18 @@ class AnalysisLoop:
         *,
         registry: MetricRegistry | None = None,
         perception: PerceptionEngine | None = None,
+        policy: RecognitionPolicy | None = None,
     ) -> None:
         self._config = config
         self._source = source
         self._mailbox = mailbox
         self.metrics = registry or MetricRegistry()
         self._perception = perception
+        self._policy = policy
         self._perception_frames = 0
         self._perception_errors = 0
+        self._policy_counts = None  # accumulated PolicyCounts, most recent apply
+        self._policy_last_raw_to_decided: list[tuple[str, str]] = []
         self._perception_static: dict[str, float] = {}
         if perception is not None:
             info = perception.info()
@@ -66,6 +71,7 @@ class AnalysisLoop:
             # Pre-register with a small window so percentile access is cheap.
             self.metrics.samples("detector_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
             self.metrics.samples("pose_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
+            self.metrics.samples("policy_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
 
         self._sample_period = 1.0 / config.consumer.sample_rate_hz
         self._stale_after_ms = config.consumer.stale_after_ms
@@ -107,6 +113,12 @@ class AnalysisLoop:
         """The perception engine driving this loop, or ``None`` when off/absent."""
 
         return self._perception
+
+    @property
+    def policy(self) -> RecognitionPolicy | None:
+        """The recognition policy applied after the detector (Phase 2.5)."""
+
+        return self._policy
 
     @property
     def mailbox(self) -> LatestFrameMailbox:
@@ -369,6 +381,34 @@ class AnalysisLoop:
         if result.frame_error:
             self._perception_errors += 1
 
+        # -- recognition policy (Phase 2.5) - after the detector, before the
+        # snapshot. Never raises (policy.apply catches its own errors).
+        out_detections = list(result.detections)
+        policy_ms = -1.0
+        policy_metrics: dict[str, float] = {}
+        if self._policy is not None:
+            p0 = time.perf_counter()
+            outcome = self._policy.apply(
+                result.detections,
+                frame_width=int(frame.width),
+                frame_height=int(frame.height),
+            )
+            policy_ms = (time.perf_counter() - p0) * 1000.0
+            out_detections = outcome.detections
+            self._policy_last_raw_to_decided = outcome.raw_to_decided
+            self._policy_counts = (
+                outcome.counts
+                if self._policy_counts is None
+                else self._policy_counts.merged(outcome.counts)
+            )
+            self.metrics.samples("policy_ms").add(policy_ms)
+            pol_samples = self.metrics.samples("policy_ms")
+            policy_metrics = {
+                **self._policy_counts.as_metrics(),
+                "policy_ms": policy_ms,
+                "policy_ms_p95": pol_samples.p95 if pol_samples.count else -1.0,
+            }
+
         det_samples = self.metrics.samples("detector_ms")
         pose_samples = self.metrics.samples("pose_ms")
         if result.detector_ms is not None:
@@ -392,12 +432,20 @@ class AnalysisLoop:
             "detector_ms_p95": det_samples.p95 if det_samples.count else -1.0,
             "pose_ms_p50": pose_samples.p50 if pose_samples.count else -1.0,
             "pose_ms_p95": pose_samples.p95 if pose_samples.count else -1.0,
-            "detections_per_frame": float(len(result.detections)),
+            "detections_per_frame": float(len(out_detections)),
             "poses_per_frame": float(len(result.poses)),
             "perception_frame_errors": float(self._perception_errors),
         }
         metrics.update(self._perception_static)
-        return list(result.detections), list(result.poses), metrics
+        metrics.update(policy_metrics)
+        return list(out_detections), list(result.poses), metrics
+
+    @property
+    def policy_raw_to_decided(self) -> list[tuple[str, str]]:
+        """(raw, decided) class-name pairs from the most recent policy apply -
+        backs the Diagnostics 'raw vs decided' readout."""
+
+        return list(self._policy_last_raw_to_decided)
 
     def _emit(self, snapshot: StateSnapshot) -> None:
         for listener in self._listeners:
@@ -500,15 +548,23 @@ def build_loop(
     *,
     registry: MetricRegistry | None = None,
     perception: PerceptionEngine | None = None,
+    policy: RecognitionPolicy | None = None,
 ) -> AnalysisLoop:
-    """Construct a loop with the frame source and perception engine from ``config``.
+    """Construct a loop with the frame source, perception engine and recognition
+    policy from ``config``.
 
     Perception is built from ``config.perception`` unless one is passed in. A
     missing weight file degrades to no perception (Phase 1.6 behaviour) rather
     than raising - see :func:`predictivesense.perception.engine.build_perception`.
+    The recognition policy (Phase 2.5) is built from ``config.policy``; with
+    ``policy.enabled`` false it is a pass-through and the pipeline behaves
+    exactly as Phase 2 did.
     """
 
     source = build_camera_source(config)
     mailbox = LatestFrameMailbox()
     engine = perception if perception is not None else build_perception(config)
-    return AnalysisLoop(config, source, mailbox, registry=registry, perception=engine)
+    pol = policy if policy is not None else RecognitionPolicy(config.policy)
+    return AnalysisLoop(
+        config, source, mailbox, registry=registry, perception=engine, policy=pol
+    )

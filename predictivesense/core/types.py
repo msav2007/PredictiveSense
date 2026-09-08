@@ -61,13 +61,32 @@ class Frame(_Frozen):
 
 
 class Detection(_Frozen):
-    """A single object detection. Defined for later phases; unused in Phase 0."""
+    """A single object detection.
+
+    Phase 2.5 added four fields **additively** (Phase 0 rule; recorded in
+    ``docs/decisions.md``) so the recognition policy layer can annotate what the
+    model said versus what the policy decided without a rename or reshape:
+
+    * ``raw_class_name`` - the class the model emitted (mirrors ``class_name``
+      until the policy relabels it).
+    * ``class_name`` - unchanged field; after the policy it is what the policy
+      decided, possibly ``"unknown"``.
+    * ``policy_state`` - ``accepted`` | ``unknown_low_confidence`` |
+      ``unknown_margin`` | ``rejected_out_of_domain`` | ``rejected_size``.
+    * ``runner_up`` - ``(class_name, score)`` of the second-best class for this
+      detection's anchor, or ``None`` when the model does not expose it.
+
+    Defaults keep every pre-2.5 construction site valid.
+    """
 
     bbox: BBox
     class_id: int
     class_name: str
     score: float
     frame_id: int
+    raw_class_name: str = ""
+    policy_state: str = "accepted"
+    runner_up: tuple[str, float] | None = None
 
 
 class Pose(_Frozen):

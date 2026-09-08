@@ -144,6 +144,34 @@ def require_models() -> None:
         )
 
 
+_EVAL_STORE = _REPO_ROOT / "data" / "eval" / "annotations.json"
+
+
+@pytest.fixture()
+def require_eval_set():
+    """Skip cleanly when the labelled evaluation set is absent or unlabelled.
+
+    Returns the loaded :class:`CocoStore`. The evaluation set is produced by
+    ``scripts/build_eval_frames.py`` + labelling at ``/label``; ``dataset``-marked
+    tests depend on it and must never fail merely because it does not exist yet.
+    """
+
+    if not _EVAL_STORE.is_file():
+        pytest.skip(
+            f"no evaluation set at {_EVAL_STORE}; run "
+            f"`python scripts/build_eval_frames.py` and label at /label"
+        )
+    from predictivesense.dataset.coco_store import CocoStore
+
+    store = CocoStore.load(_EVAL_STORE)
+    if store.counts()["labelled"] == 0:
+        pytest.skip(
+            f"{_EVAL_STORE} has 0 labelled frames; label at /label before "
+            f"running dataset-marked tests"
+        )
+    return store
+
+
 @pytest.fixture(scope="session")
 def fixture_video() -> Path:
     """Path to the deterministic test clip, regenerated if missing."""

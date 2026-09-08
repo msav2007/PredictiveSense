@@ -26,6 +26,29 @@ This is recorded as an **open, unresolved decision** - it is *not* resolved here
   per model; `scripts/fetch_models.py` also writes `models/LICENSE-AGPL-3.0.txt`
   beside the weights (git-ignored).
 
+### Phase 2.5 - evidence gathered, decision still deferred (2026-09-08)
+
+Phase 2.5 wired **Megvii YOLOX-tiny** (`yolox_tiny.onnx`, **Apache-2.0**) through
+the identical detector wrapper (new `decode: "yolox"` variant), recognition
+policy, splits and harness - the permissively-licensed alternative BLOCK 3.18
+asks for. It is fetched + SHA-256-verified by `scripts/fetch_models.py`
+(`models/manifest.json` `detector_alt`; `.onnx` still git-ignored).
+
+**What is measured** (`results/model_comparison.md`, `results/latency_2_5.md`,
+`results/policy_effect_unlabelled_*.md`): both models over the identical 34
+sampled frames of the developer's footage, and isolated latency. On *unlabelled*
+frames YOLOX-tiny fires far more loosely (71 raw detections vs YOLO11n's 43; 34
+out-of-domain rejections by the policy vs 4) - it would need heavier per-class
+thresholding. Detection *accuracy* (per-class F1, false-class rate) needs the
+developer's `val` labels and is **pending**.
+
+**Decision: still deferred, and this phase does NOT claim it is settled.** The
+alternative is integrated and its behaviour is partially measured, but the
+labelled `val` comparison that would actually decide it has not been run (no
+labels yet). Until then the default stays `models/yolo11n.onnx` (AGPL-3.0). When
+`val` is labelled, `scripts/eval_detection.py --model yolox_tiny --policy on`
+completes `results/model_comparison.md` and the decision is made on evidence.
+
 ## Runtime dependencies
 
 | Package | Version | Licence | Why it is needed |
@@ -41,12 +64,19 @@ This is recorded as an **open, unresolved decision** - it is *not* resolved here
 | `python-multipart` | 0.0.20 | Apache-2.0 | `multipart/form-data` parsing for `POST /api/record/upload` (Starlette requires it for `UploadFile` / `Form`). |
 | `onnxruntime` | 1.24.4 | MIT | Phase 2 perception: runs the ONNX object detector and pose estimator (`predictivesense/perception/`). CPU build only in the main `.venv`. `onnxruntime-directml` and `onnxruntime-openvino` share the module name and **must not** be co-installed - the DirectML benchmark uses a separate `.venv-dml`. Prebuilt wheels only - no runtime download, **no CUDA**. Imported only under `predictivesense/perception/`. Transitive: `protobuf`, `flatbuffers`, `sympy`+`mpmath`, `coloredlogs`+`humanfriendly`, `pyreadline3`. |
 
+**Phase 2.5 adds no runtime dependency.** `predictivesense/dataset/` and
+`predictivesense/eval/` are stdlib + `numpy` only. The evaluation *scripts* that
+decode frame images use `cv2.imread` and live in `scripts/` (outside the scanned
+package), so the `cv2`/`onnxruntime` import scoping is unchanged. The labelling
+tool is plain ES modules from `static/label/`.
+
 ## Model files (not committed - `models/manifest.json` only)
 
 | Model | Family | Task | Licence | Source |
 |---|---|---|---|---|
 | `yolo11n.onnx` | Ultralytics YOLO11n | detection (COCO-80) | **AGPL-3.0-only** | `github.com/ultralytics/assets` release `v8.3.0`, pre-exported ONNX (opset 22, dynamic input) |
 | `yolo11n-pose.onnx` | Ultralytics YOLO11n-pose | pose (17 keypoints) | **AGPL-3.0-only** | same release, input locked to 640x640 |
+| `yolox_tiny.onnx` | Megvii YOLOX-tiny | detection (COCO-80) | **Apache-2.0** | `github.com/Megvii-BaseDetection/YOLOX` release `0.1.1rc0`, input locked to 416x416, raw head (grid decode). Phase 2.5 permissive-licence comparison detector - see the open-decision box above. |
 
 Fetched and hash-verified by `python scripts/fetch_models.py` against
 `models/manifest.json`. See the open-decision box above.

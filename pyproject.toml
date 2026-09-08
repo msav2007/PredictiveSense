@@ -42,7 +42,7 @@ camera = [
 include = ["predictivesense*"]
 
 [tool.setuptools.package-data]
-"predictivesense.api.static" = ["*.html", "*.js", "*.css"]
+"predictivesense.api.static" = ["**/*.html", "**/*.js", "**/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -55,4 +55,5 @@ markers = [
     "slow: runs for several seconds or more",
     "hardware: requires a physical camera; skipped unless --run-hardware is passed",
     "models: requires ONNX weights under models/; skips cleanly when they are absent",
+    "dataset: requires the labelled evaluation set under data/eval/; skips cleanly when it is absent",
 ]

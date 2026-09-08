@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 
 import cv2
+import numpy as np
 
-__all__ = ["quiet_opencv_logging", "fourcc_to_str"]
+__all__ = ["quiet_opencv_logging", "fourcc_to_str", "read_image_bgr"]
 
 _LOG_LEVEL_ERROR = 2  # cv2 log levels: 0 SILENT, 1 FATAL, 2 ERROR, 3 WARNING, ...
 _quieted = False
@@ -38,6 +40,17 @@ def quiet_opencv_logging() -> None:
         except (AttributeError, cv2.error):  # pragma: no cover - build-dependent
             pass
         _quieted = True
+
+
+def read_image_bgr(path: str | Path) -> np.ndarray | None:
+    """Decode an image file to a contiguous ``HxWx3`` BGR ``uint8`` array, or
+    ``None`` if it cannot be read. Used by the Phase 2.5 labelling seed path so
+    ``cv2`` stays out of the API layer."""
+
+    img = cv2.imread(str(path))
+    if img is None or img.ndim != 3 or img.shape[2] != 3:
+        return None
+    return np.ascontiguousarray(img)
 
 
 def fourcc_to_str(value: float | int) -> str:

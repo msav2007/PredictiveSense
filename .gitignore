@@ -24,6 +24,10 @@ data/**
 !data/raw/.gitkeep
 results/*
 !results/.gitkeep
+# Phase 2.5 audit deliverables (not derived metrics - these are the committed
+# record of when `test` was opened and the alternative-model licence evidence).
+!results/test_set_openings.md
+!results/model_comparison.md
 
 # Generated test fixtures (regenerated on demand by tests/fixtures/make_fixture_video.py)
 tests/fixtures/*.avi

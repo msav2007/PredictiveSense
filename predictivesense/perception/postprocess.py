@@ -9,7 +9,40 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["xywh_to_xyxy", "nms", "class_aware_nms"]
+__all__ = ["xywh_to_xyxy", "nms", "class_aware_nms", "yolox_decode"]
+
+
+def yolox_decode(
+    raw: np.ndarray, input_size: int, strides: tuple[int, ...] = (8, 16, 32)
+) -> np.ndarray:
+    """Grid-decode a YOLOX raw head ``(anchors, 5 + num_classes)``.
+
+    YOLOX exports its ONNX head un-decoded: each row is a feature-map cell with
+    ``[cx, cy, w, h]`` relative to its grid and ``obj``/``cls`` already
+    sigmoid-activated. This applies the standard ``demo_postprocess`` transform
+    so ``[:, :4]`` become ``cx, cy, w, h`` in input pixels. Returns a new array;
+    the input is untouched.
+    """
+
+    out = np.asarray(raw, dtype=np.float64).copy()
+    grids: list[np.ndarray] = []
+    expanded: list[np.ndarray] = []
+    for stride in strides:
+        g = input_size // stride
+        yv, xv = np.meshgrid(np.arange(g), np.arange(g), indexing="ij")
+        grid = np.stack((xv, yv), axis=2).reshape(-1, 2)
+        grids.append(grid)
+        expanded.append(np.full((grid.shape[0], 1), stride, dtype=np.float64))
+    grid_all = np.concatenate(grids, axis=0)
+    stride_all = np.concatenate(expanded, axis=0)
+    if grid_all.shape[0] != out.shape[0]:
+        raise ValueError(
+            f"yolox_decode: {out.shape[0]} anchors do not match a {input_size}px "
+            f"grid for strides {strides} ({grid_all.shape[0]} cells)"
+        )
+    out[:, :2] = (out[:, :2] + grid_all) * stride_all
+    out[:, 2:4] = np.exp(out[:, 2:4]) * stride_all
+    return out
 
 
 def xywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:

@@ -22,6 +22,7 @@ import * as cameraGroup from "/static/groups/camera.js";
 import * as videoGroup from "/static/groups/video.js";
 import * as datasetGroup from "/static/groups/dataset.js";
 import * as analysisGroup from "/static/groups/analysis.js";
+import * as researchGroup from "/static/groups/research.js";
 import * as diagnosticsGroup from "/static/groups/diagnostics.js";
 
 import { initAnalysisClient } from "/static/features/analysis-client.js";
@@ -39,6 +40,7 @@ const GROUPS = [
   videoGroup,
   datasetGroup,
   analysisGroup,
+  researchGroup,
   diagnosticsGroup,
 ];
 

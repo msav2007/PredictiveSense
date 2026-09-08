@@ -5,8 +5,9 @@ No browser automation, no new dependency - just read the files under
 ``predictivesense/api/static/`` and assert the interface architecture holds:
 a shell mount (not a legacy panel stack), the registered groups each exporting
 the extension contract, and the still-reserved ids declared-but-not-registered.
-Phase 2 registered ``analysis`` (Detection + Pose sub-modules); ``alerts`` and
-``research`` remain reserved.
+Phase 2 registered ``analysis`` (Detection + Pose sub-modules); Phase 2.5
+registered ``research`` (labelling + evaluation); only ``alerts`` remains
+reserved.
 """
 
 from __future__ import annotations
@@ -23,8 +24,8 @@ pytestmark = pytest.mark.unit
 _STATIC = Path(predictivesense.__file__).resolve().parent / "api" / "static"
 _GROUPS = _STATIC / "groups"
 
-REGISTERED_GROUP_IDS = ["input", "camera", "video", "dataset", "analysis", "diagnostics"]
-RESERVED_GROUP_IDS = ["alerts", "research"]
+REGISTERED_GROUP_IDS = ["input", "camera", "video", "dataset", "analysis", "research", "diagnostics"]
+RESERVED_GROUP_IDS = ["alerts"]
 
 
 def _read(p: Path) -> str:
@@ -111,6 +112,30 @@ def test_analysis_group_hosts_detection_and_pose_submodules() -> None:
 def _read_reserved_ids_line(consts: str) -> str:
     m = re.search(r"RESERVED_GROUP_IDS\s*=\s*\[[^\]]*\]", consts)
     return m.group(0) if m else ""
+
+
+def test_research_group_registered_with_labelling_and_eval() -> None:
+    research = _read(_GROUPS / "research.js")
+    assert re.search(r'export\s+const\s+id\s*=\s*"research"', research)
+    assert "/label" in research, "Research group must link to the labelling tool"
+    assert "/api/labels/progress" in research
+    assert "/api/labels/eval-summary" in research
+    consts = _read(_GROUPS / "constants.js")
+    assert "research: 70" in consts
+    assert '"research"' not in _read_reserved_ids_line(consts)
+    app = _read(_STATIC / "app.js")
+    assert app.count("/static/groups/research.js") == 1
+
+
+def test_policy_controls_and_unknown_rendering_present() -> None:
+    detection = _read(_STATIC / "features" / "detection.js")
+    assert "/static/features/policy.js" in detection
+    assert "Recognition policy" in detection
+    overlay = _read(_STATIC / "features" / "overlay.js")
+    assert "Unknown" in overlay and "effectiveDetection" in overlay
+    diagnostics = _read(_GROUPS / "diagnostics.js")
+    assert "policy_rejected_out_of_domain" in diagnostics
+    assert "raw" in diagnostics and "decided" in diagnostics
 
 
 def test_overlay_never_touches_the_video_element() -> None:

@@ -17,6 +17,7 @@ from pathlib import Path
 from predictivesense.config.settings import ConfigError, ValidationError, load_config
 from predictivesense.logging_setup import configure_logging, get_logger
 from predictivesense.perception.engine import build_perception
+from predictivesense.perception.policy import RecognitionPolicy
 from predictivesense.pipeline.recorded import RecordedDriver
 
 _LOG = get_logger("predictivesense.scripts.run_recorded")
@@ -31,6 +32,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--no-perception",
         action="store_true",
         help="skip detection/pose even if the profile enables them",
+    )
+    parser.add_argument(
+        "--no-policy",
+        action="store_true",
+        help="skip the recognition policy layer (raw detector output)",
     )
     return parser.parse_args(argv)
 
@@ -65,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
             _LOG.error("%s", exc)
             return 2
 
+    policy = None if args.no_policy else RecognitionPolicy(config.policy)
+
     driver = RecordedDriver(results_dir=config.results_dir)
     try:
         result = driver.run(
@@ -72,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             replay_mode=replay_mode,
             config_profile=config.profile,
             perception=perception,
+            policy=policy,
         )
     except (RuntimeError, OSError) as exc:
         _LOG.error("recorded run failed: %r", exc)
@@ -83,6 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     _LOG.info("replay mode : %s", result["replay_mode"])
     _LOG.info("frames      : %d", result["frames"])
     _LOG.info("perception  : %s", "on" if perception is not None else "off")
+    _LOG.info("policy      : %s", "on" if policy is not None else "off")
     _LOG.info("detections  : %d", result.get("total_detections", 0))
     _LOG.info("poses       : %d", result.get("total_poses", 0))
     _LOG.info("jsonl       : %s", result["jsonl_path"])

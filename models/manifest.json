@@ -31,6 +31,21 @@
       "license": "AGPL-3.0-only",
       "license_url": "https://github.com/ultralytics/ultralytics/blob/main/LICENSE",
       "license_note": "Same AGPL-3.0 open decision as the detector."
+    },
+    "detector_alt": {
+      "filename": "yolox_tiny.onnx",
+      "url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx",
+      "sha256": "427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7",
+      "size_bytes": 20219662,
+      "task": "detect",
+      "family": "yolox-tiny",
+      "input_size": 416,
+      "input_dynamic": false,
+      "classes": "coco-80",
+      "decode": "yolox",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/Megvii-BaseDetection/YOLOX/blob/main/LICENSE",
+      "license_note": "Phase 2.5 permissively-licensed comparison detector (Megvii YOLOX). Evaluated on the identical eval set so the AGPL-3.0 licence decision is settled by evidence - see docs/attribution.md and results/model_comparison.md."
     }
   }
 }

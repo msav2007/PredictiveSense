@@ -88,3 +88,35 @@ perception:
     conf: 0.4
     max_persons: 4
     keypoint_visibility_threshold: 0.3
+  pose_requires_person: false   # Phase 2.5 - see docs/phase-reports/phase2_5.md
+
+# Phase 2.5 - identical policy / dataset / eval settings to dev so real-time and
+# recorded modes run the same recognition policy code.
+policy:
+  enabled: true
+  domain_restriction: true
+  margin_rule: true
+  size_rule: true
+  per_class_threshold_rule: true
+  domain_classes: [person, cup, bottle, laptop, keyboard, mouse, chair, book,
+                   cell phone, backpack, handbag, scissors, bowl, remote]
+  per_class_thresholds: {}      # fitted on val by scripts/fit_thresholds.py (results/fit_thresholds_val.md)
+  default_threshold: 0.35
+  margin_min: 0.10
+  min_box_area_frac: 0.0005
+  emit_unknown: true
+  aspect_ratio_bounds: {}
+
+dataset:
+  root: data/eval
+  coco_path: data/eval/annotations.json
+  splits_path: data/eval/splits.json
+  frames_dirname: frames
+  min_unseeded_fraction: 0.30
+
+eval:
+  iou_threshold: 0.5
+  results_dir: results
+  val_fraction: 0.5
+  test_fraction: 0.5
+  split_seed: 20260908

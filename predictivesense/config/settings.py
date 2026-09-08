@@ -31,6 +31,9 @@ __all__ = [
     "DetectorConfig",
     "PoseConfig",
     "PerceptionConfig",
+    "PolicyConfig",
+    "DatasetConfig",
+    "EvalConfig",
     "available_profiles",
     "load_config",
     "default_profiles_dir",
@@ -162,6 +165,11 @@ class DetectorConfig(_Section):
 
     model_path: Path = Field(default=Path("models/yolo11n.onnx"))
     input_size: int = Field(gt=0, default=640)
+    # Head-decode variant. "yolo" = Ultralytics YOLO11 detect head (RGB, /255,
+    # centred letterbox). "yolox" = Megvii YOLOX raw head (BGR, no /255,
+    # top-left letterbox, grid decode) - the Phase 2.5 permissive-licence
+    # comparison model. Adding this variant does not change the "yolo" path.
+    decode: Literal["yolo", "yolox"] = "yolo"
     nms_iou: float = Field(gt=0.0, le=1.0, default=0.5)
     # Documented default; per-class overrides live in ``class_thresholds`` and are
     # set from the class-coverage audit. A single global threshold is not enough.
@@ -237,6 +245,113 @@ class PerceptionConfig(_Section):
     def any_enabled(self) -> bool:
         return self.detection_enabled or self.pose_enabled
 
+    # -- Phase 2.5: person-gated pose --------------------------------
+    # Measured before/after in docs/phase-reports/phase2_5.md. When true, pose
+    # runs on a sampled frame only if the detector found at least one `person`
+    # on that frame (still also subject to pose_every_n). Cuts combined
+    # per-frame cost on frames with no person without losing any real skeleton.
+    pose_requires_person: bool = False
+
+
+class PolicyConfig(_Section):
+    """Phase 2.5 recognition policy layer - sits AFTER the detector and BEFORE
+    the snapshot. Every rule is independently switchable and every outcome is
+    counted; ``accepted + unknown + rejected == input count`` always holds. With
+    ``enabled=False`` the pipeline behaves exactly as Phase 2 did.
+
+    Defaults for ``per_class_thresholds`` / ``margin_min`` are fitted on the
+    ``val`` split by ``scripts/fit_thresholds.py`` - see the profile comments
+    that name the justifying result file. ``default_threshold`` is an explicit
+    fallback only.
+    """
+
+    enabled: bool = True
+    domain_restriction: bool = True
+    margin_rule: bool = True
+    size_rule: bool = True
+    per_class_threshold_rule: bool = True
+    # Classes plausible in this indoor cabin scene. Anything the model emits
+    # outside this set is rejected as out-of-domain. Validated against COCO-80
+    # (the shipped detector's vocabulary) so a typo fails loudly (BLOCK 10).
+    domain_classes: tuple[str, ...] = (
+        "person", "cup", "bottle", "laptop", "keyboard", "mouse", "chair",
+        "book", "cell phone", "backpack", "handbag", "scissors", "bowl",
+        "remote",
+    )
+    per_class_thresholds: dict[str, float] = Field(default_factory=dict)
+    default_threshold: float = Field(gt=0.0, le=1.0, default=0.35)
+    # top1 - top2 below this -> emit `unknown` instead of the top-1 guess.
+    margin_min: float = Field(ge=0.0, le=1.0, default=0.10)
+    min_box_area_frac: float = Field(ge=0.0, le=1.0, default=0.0005)
+    # A rejected-but-real detection keeps its box and renders as `unknown`
+    # (BLOCK 3.14). Setting this false discards the box - not recommended.
+    emit_unknown: bool = True
+    # Per-class aspect-ratio sanity bound (w/h), applied only to classes listed.
+    # Empty by default - a judgement call, documented in decisions.md.
+    aspect_ratio_bounds: dict[str, tuple[float, float]] = Field(default_factory=dict)
+
+    @field_validator("per_class_thresholds")
+    @classmethod
+    def _pct_in_range(cls, value: dict[str, float]) -> dict[str, float]:
+        for name, thr in value.items():
+            if not (0.0 < thr <= 1.0):
+                raise ValueError(f"per_class_thresholds[{name!r}] must be in (0, 1]")
+        return value
+
+    @field_validator("domain_classes")
+    @classmethod
+    def _domain_classes_are_emittable(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        # Fail loudly on a domain_classes entry the shipped model cannot emit
+        # (BLOCK 10). Import here to avoid a settings <- perception import at
+        # module load; perception.classes is stdlib-only.
+        from predictivesense.perception.classes import COCO_CLASSES
+
+        unknown = [c for c in value if c not in set(COCO_CLASSES)]
+        if unknown:
+            raise ValueError(
+                f"policy.domain_classes entries not in the COCO-80 vocabulary: "
+                f"{unknown}. Fix the spelling or use a model whose `names` "
+                f"metadata includes them."
+            )
+        if not value:
+            raise ValueError("policy.domain_classes must not be empty")
+        return value
+
+    @field_validator("aspect_ratio_bounds")
+    @classmethod
+    def _aspect_bounds_ordered(
+        cls, value: dict[str, tuple[float, float]]
+    ) -> dict[str, tuple[float, float]]:
+        for name, (lo, hi) in value.items():
+            if not (0.0 < lo <= hi):
+                raise ValueError(
+                    f"aspect_ratio_bounds[{name!r}] must be (lo, hi) with 0 < lo <= hi"
+                )
+        return value
+
+
+class DatasetConfig(_Section):
+    """Phase 2.5 labelled evaluation set (COCO detection JSON)."""
+
+    root: Path = Field(default=Path("data/eval"))
+    coco_path: Path = Field(default=Path("data/eval/annotations.json"))
+    splits_path: Path = Field(default=Path("data/eval/splits.json"))
+    frames_dirname: str = Field(default="frames")
+    # At least this fraction of labelled frames must be labelled with detector
+    # seeding OFF, as a recall-bias check (BLOCK 3.1.4).
+    min_unseeded_fraction: float = Field(ge=0.0, le=1.0, default=0.30)
+
+
+class EvalConfig(_Section):
+    """Phase 2.5 detection evaluation harness."""
+
+    iou_threshold: float = Field(gt=0.0, le=1.0, default=0.5)
+    results_dir: Path = Field(default=Path("results"))
+    # Session fractions for scripts/build_splits.py (test is opened once).
+    val_fraction: float = Field(gt=0.0, lt=1.0, default=0.5)
+    test_fraction: float = Field(gt=0.0, lt=1.0, default=0.5)
+    split_seed: int = Field(ge=0, default=20260908)
+
 
 class AppConfig(BaseSettings):
     """The fully resolved configuration for one run.
@@ -265,6 +380,9 @@ class AppConfig(BaseSettings):
     recorder: RecorderConfig = Field(default_factory=RecorderConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
     perception: PerceptionConfig = Field(default_factory=PerceptionConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    dataset: DatasetConfig = Field(default_factory=DatasetConfig)
+    eval: EvalConfig = Field(default_factory=EvalConfig)
 
     def as_json_dict(self) -> dict[str, Any]:
         """Resolved config as a JSON-serialisable dict (for the manifest and API)."""

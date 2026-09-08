@@ -80,6 +80,23 @@ export function render(body) {
   }
   body.append(pgrid);
 
+  // ---- Phase 2.5 recognition policy ----
+  body.append(el("p", { class: "subhead", text: "Recognition policy" }));
+  const polgrid = el("dl", { class: "metric-grid", id: "policy-metric-grid" });
+  for (const [key, label] of POLICY_METRICS) {
+    polgrid.append(
+      el("div", {}, [
+        el("dt", {}, [label, el("span", { class: "raw-key", text: ` ${key}` })]),
+        el("dd", { id: `m-${key}`, text: "—" }),
+      ]),
+    );
+  }
+  body.append(polgrid);
+  body.append(el("p", { class: "note", text: "raw → decided (last frame):" }));
+  body.append(el("ul", { class: "line-list", id: "policy-raw-decided" }, [
+    el("li", { text: "—" }),
+  ]));
+
   const cap = (runtime.config && runtime.config.capture) || {};
   body.append(
     el("p", { class: "subhead", text: "Provider" }),
@@ -125,6 +142,18 @@ const PERCEPTION_METRICS = [
   ["perception_frame_errors", "Perception frame errors"],
 ];
 
+// Phase 2.5 policy counters (cumulative) + per-frame cost.
+const POLICY_METRICS = [
+  ["policy_accepted", "Accepted (cum.)"],
+  ["policy_unknown_low_confidence", "Unknown · low confidence"],
+  ["policy_unknown_margin", "Unknown · margin"],
+  ["policy_rejected_out_of_domain", "Rejected · out of domain"],
+  ["policy_rejected_size", "Rejected · size"],
+  ["policy_errors", "Policy errors"],
+  ["policy_ms", "Policy cost (ms)"],
+  ["policy_ms_p95", "Policy cost p95 (ms)"],
+];
+
 function kv(label, value) {
   return el("div", {}, [el("dt", { text: label }), el("dd", { text: value })]);
 }
@@ -149,5 +178,29 @@ export function update(state) {
     const v = m[key];
     const digits = key.includes("per_frame") || key.includes("errors") ? 2 : 1;
     dd.textContent = v === undefined || v === null || v < 0 ? "—" : Number(v).toFixed(digits);
+  }
+  for (const [key] of POLICY_METRICS) {
+    const dd = document.getElementById(`m-${key}`);
+    if (!dd) continue;
+    const v = m[key];
+    const digits = key.startsWith("policy_ms") ? 3 : 0;
+    dd.textContent = v === undefined || v === null || v < 0 ? "—" : Number(v).toFixed(digits);
+  }
+  const rd = document.getElementById("policy-raw-decided");
+  if (rd) {
+    const dets = (state && state.snapshot && state.snapshot.detections) || [];
+    const changed = dets.filter(
+      (d) => (d.policy_state && d.policy_state !== "accepted") ||
+             (d.raw_class_name && d.raw_class_name !== d.class_name),
+    );
+    rd.replaceChildren(
+      ...(changed.length
+        ? changed.slice(0, 8).map((d) =>
+            el("li", {
+              text: `${d.raw_class_name || d.class_name} → ${d.class_name} (${d.policy_state || "accepted"})`,
+            }),
+          )
+        : [el("li", { text: "no changes this frame" })]),
+    );
   }
 }

@@ -18,6 +18,11 @@
 import { runtime } from "/static/features/runtime.js";
 import { store } from "/static/ui/store.js";
 import { isLayerEnabled } from "/static/features/analysis-prefs.js";
+import { effectiveDetection } from "/static/features/policy.js";
+
+// Muted styling for a policy `unknown` / rejected detection - visually distinct
+// from a confident detection and from nothing at all (BLOCK 3.14 / 3.24).
+const UNKNOWN_COLOUR = "rgb(148, 163, 184)";
 
 // COCO 17-keypoint skeleton (mirrors perception/classes.py SKELETON_EDGES).
 const SKELETON_EDGES = [
@@ -166,18 +171,24 @@ function drawDetection(d, mapX, mapY, band) {
   const py = mapY(y1);
   const pw = mapX(x2) - px;
   const ph = mapY(y2) - py;
-  const colour = classColor(d.class_id);
-  const lowConf = d.score >= band[0] && d.score < band[1];
+
+  const eff = effectiveDetection(d);
+  const isUnknown = eff.kind !== "accepted";
+  const colour = isUnknown ? UNKNOWN_COLOUR : classColor(d.class_id);
+  const lowConf = !isUnknown && d.score >= band[0] && d.score < band[1];
+  const dashed = isUnknown || lowConf;
 
   ctx.save();
   ctx.strokeStyle = colour;
-  ctx.lineWidth = lowConf ? 1.5 : 2.5;
-  ctx.globalAlpha *= lowConf ? 0.5 : 1.0;
-  ctx.setLineDash(lowConf ? [6, 4] : []);
+  ctx.lineWidth = isUnknown ? 1.5 : lowConf ? 1.5 : 2.5;
+  ctx.globalAlpha *= isUnknown ? 0.55 : lowConf ? 0.5 : 1.0;
+  ctx.setLineDash(dashed ? [6, 4] : []);
   ctx.strokeRect(px, py, pw, ph);
   ctx.setLineDash([]);
 
-  const label = `${aliasFor(d.class_name)} ${(d.score * 100).toFixed(0)}%`;
+  const label = isUnknown
+    ? `Unknown${eff.raw ? ` (was ${aliasFor(eff.raw)})` : ""}`
+    : `${aliasFor(eff.label || d.class_name)} ${(d.score * 100).toFixed(0)}%`;
   ctx.font = "12px ui-monospace, monospace";
   const tw = ctx.measureText(label).width + 10;
   const th = 16;

@@ -38,6 +38,7 @@ from predictivesense.telemetry.manifest import git_state, utc_now_iso
 if TYPE_CHECKING:
     from predictivesense.core.types import Detection, Pose
     from predictivesense.perception.engine import PerceptionEngine
+    from predictivesense.perception.policy import RecognitionPolicy
 
 __all__ = ["RecordedDriver", "RecordedResult"]
 
@@ -47,15 +48,26 @@ _COORD_DP = 2   # box / keypoint pixel precision in the JSONL
 _SCORE_DP = 4   # confidence precision in the JSONL
 
 
-def _detection_to_dict(det: "Detection") -> dict[str, object]:
+def _detection_to_dict(det: "Detection", *, annotated: bool) -> dict[str, object]:
     x1, y1, x2, y2 = det.bbox
-    return {
+    out: dict[str, object] = {
         "bbox": [round(x1, _COORD_DP), round(y1, _COORD_DP),
                  round(x2, _COORD_DP), round(y2, _COORD_DP)],
         "class_id": det.class_id,
         "class_name": det.class_name,
         "score": round(det.score, _SCORE_DP),
     }
+    # Phase 2.5 additive fields - written only when the recognition policy ran, so
+    # a `perception=`-only run (no `policy=`) keeps the exact Phase 2 JSONL shape.
+    if annotated:
+        out["raw_class_name"] = det.raw_class_name or det.class_name
+        out["policy_state"] = det.policy_state or "accepted"
+        out["runner_up"] = (
+            [det.runner_up[0], round(float(det.runner_up[1]), _SCORE_DP)]
+            if det.runner_up is not None
+            else None
+        )
+    return out
 
 
 def _pose_to_dict(pose: "Pose") -> dict[str, object]:
@@ -90,6 +102,7 @@ class RecordedDriver:
         run_id: str | None = None,
         config_profile: str = "unknown",
         perception: "PerceptionEngine | None" = None,
+        policy: "RecognitionPolicy | None" = None,
     ) -> RecordedResult:
         src_path = Path(path)
         run_id = run_id or uuid.uuid4().hex
@@ -105,6 +118,7 @@ class RecordedDriver:
         total_detections = 0
         total_poses = 0
         perception_errors = 0
+        policy_counts = None
 
         source = FileSource(src_path, replay_mode=replay_mode)
         source.start()
@@ -124,7 +138,23 @@ class RecordedDriver:
                         result = perception.infer(frame, frame_index=frame.frame_id)
                         if result.frame_error:
                             perception_errors += 1
-                        dets = [_detection_to_dict(d) for d in result.detections]
+                        out_dets = list(result.detections)
+                        if policy is not None:
+                            outcome = policy.apply(
+                                result.detections,
+                                frame_width=int(frame.width),
+                                frame_height=int(frame.height),
+                            )
+                            out_dets = outcome.detections
+                            policy_counts = (
+                                outcome.counts
+                                if policy_counts is None
+                                else policy_counts.merged(outcome.counts)
+                            )
+                        dets = [
+                            _detection_to_dict(d, annotated=policy is not None)
+                            for d in out_dets
+                        ]
                         poses = [_pose_to_dict(p) for p in result.poses]
                         total_detections += len(dets)
                         total_poses += len(poses)
@@ -179,6 +209,17 @@ class RecordedDriver:
                     **perception.info(),
                 }
                 if perception is not None
+                else {"enabled": False}
+            ),
+            "policy": (
+                {
+                    "enabled": True,
+                    **policy.info(),
+                    "counts": (
+                        policy_counts.as_metrics("") if policy_counts is not None else {}
+                    ),
+                }
+                if policy is not None
                 else {"enabled": False}
             ),
             "jsonl_path": str(jsonl_path),

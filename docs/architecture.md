@@ -479,3 +479,118 @@ alert policy, TTS. `StateSnapshot.tracks` is still always `[]`. No fine-tuning,
 no training, no dataset pipeline. No accuracy / precision / recall / mAP figure
 exists - there is no labelled data; `results/class_coverage.md` is detection
 frequency on unlabelled footage.
+
+---
+
+# Phase 2.5 - recognition reliability & measurement
+
+Turns "the detector is not trustworthy in this room" (Phase 2 developer
+observations) into something measurable and improvable: a labelled evaluation set
+from the project's own footage, an evaluation harness, and a switchable
+recognition policy - with the policy's effect shown by a before/after on that set.
+No tracking, temporal state, risk, or voice. No training.
+
+## Shape
+
+```
+data/raw/*.webm ─ build_eval_frames.py ─▶ data/eval/frames/*.jpg  +  COCO store (images only)
+                                                    │
+                                     /label  ◀──────┤  developer draws boxes  ─▶  POST /api/labels/frame/{id}
+                                                    ▼
+                                     data/eval/annotations.json  (COCO: images/annotations/categories)
+                                                    │
+                          build_splits.py  ─▶  data/eval/splits.json  (session-disjoint, hashed)
+                                                    │
+        fit_thresholds.py --split val  ─▶  results/fit_thresholds_val.md  (per-class thr + margin_min)
+                                                    │
+  eval_detection.py --split val|test --model M --policy on|off
+        detector ─▶ [RecognitionPolicy] ─▶ predictions
+        predictions × ground truth ─ eval.matching (greedy IoU) ─ eval.metrics
+        ─▶ results/eval_<model>_<policy>_<split>.{json,md}   (false-class rate = headline)
+```
+
+The **same** `RecognitionPolicy` runs live: `pipeline/loop.py` and
+`pipeline/recorded.py` call `policy.apply(detections, frame_w, frame_h)` right
+after `PerceptionEngine.infer` and before the snapshot / JSONL line.
+
+## `predictivesense/dataset/`
+
+| module | responsibility |
+|---|---|
+| `coco_store.py` | `CocoStore` - read/write COCO detection JSON, id allocation (never collides across reload), schema validation (`CocoStoreError`, BLOCK 10), `.bak` before every overwrite, `seeded` / `labelled` / `ps_provenance` per image, `content_hash()`, `counts()`. `domain_categories(names)` builds the `categories` list. |
+| `splits.py` | `build_splits` (whole sessions -> `val`/`test` by seeded shuffle), `splits_content_hash`, `assert_no_leakage` (raises `SplitLeakageError` if a session or image id is shared), `load_splits` (refuses a stale hash). |
+| `quality.py` | `FrameProvenance` dataclass, `ProgressSummary.from_store` (counts by class / session / seeded-unseeded + unseeded-fraction target), `unseeded_image_ids` / `seeded_image_ids`. |
+
+## `predictivesense/perception/policy.py`
+
+`RecognitionPolicy(config.policy)`. `apply(detections, *, frame_width,
+frame_height) -> PolicyOutcome`. Four independently-switchable rules, applied
+first-match-wins per detection: **size** (`min_box_area_frac` + optional per-class
+aspect bound) -> `rejected_size`; **domain** (`domain_classes` whitelist) ->
+`rejected_out_of_domain`; **per-class threshold** (fitted on `val`,
+`default_threshold` fallback) -> `unknown_low_confidence`; **top-2 margin**
+(`score - runner_up.score < margin_min`) -> `unknown_margin`; else `accepted`.
+Every input detection produces exactly one output (`accepted + unknown + rejected
+== input`, asserted). A non-accepted detection **keeps its box**; only its
+`class_name` becomes `"unknown"` and `policy_state` records why (`emit_unknown`).
+`policy.enabled = false` -> pure pass-through (Phase 2 behaviour). Never raises
+into the loop. Per-frame cost measured < 0.1 ms p95.
+
+## `predictivesense/eval/`
+
+| module | responsibility |
+|---|---|
+| `matching.py` | `iou_xyxy`, `iou_matrix`, `greedy_match` - class-agnostic geometry, predictions in descending score order claim the best free ground-truth box at/above the IoU threshold; the rest are false positives, unclaimed GT are misses. |
+| `metrics.py` | `evaluate(samples, class_names, iou_threshold) -> EvalMetrics`: per-class P/R/F1/support, confusion matrix with `background` + `unknown` rows/cols, **false-class rate** (matched pair, wrong real class, not `unknown` - the headline), `unknown_on_object_rate`, `localization_recall`, `background_fp_rate`, AP@0.5 / mAP@0.5 (all-point interpolation), top confusions with example image ids. Every metric carries its sample count. Empty-safe. |
+| `report.py` | `run_metadata` (model name + sha256, policy config, split hash, git commit, machine, seed) + `write_reports` (json + markdown). |
+
+## `predictivesense/api/labels.py`
+
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/api/labels/frames` | paged frame list (`labelled`, `seeded`, session id) |
+| GET | `/api/labels/frame/{id}` | metadata + boxes; `?seed=1` adds detector proposals (recorded per image) |
+| POST | `/api/labels/frame/{id}` | replace boxes, set `labelled`, record `seeded` |
+| GET | `/api/labels/progress` | counts by class / session / seeded-unseeded |
+| GET | `/api/labels/image/{id}` | the frame JPEG |
+| GET | `/api/labels/eval-summary` | latest `results/eval_*` summary, or `{available:false}` |
+
+`GET /label` serves the standalone labelling tool (`static/label/`). The store is
+created by `scripts/build_eval_frames.py`; until it exists every endpoint returns
+503 with the command to run. A module lock serialises writes.
+
+## Scripts
+
+`build_eval_frames.py` (sample frames + provenance + create COCO store),
+`build_splits.py` (session-disjoint split + hash), `fit_thresholds.py` (per-class
+threshold + `margin_min` on `val` only), `eval_detection.py` (the harness; logs
+every `test` opening to `results/test_set_openings.md`), `policy_effect.py`
+(mechanical policy effect on unlabelled frames - counts, not accuracy),
+`benchmark_latency.py` (pose gating / thread sweep / policy cost). `fetch_models.py`
+now also fetches `yolox_tiny.onnx` (Apache-2.0) for the comparison.
+
+## UI
+
+`groups/research.js` (order 70, the Phase 1.6-reserved slot, filled like Phase 2
+filled `analysis`): links to `/label`, live labelling progress, latest eval
+summary. `features/policy.js` + additions to `features/detection.js` (policy
+on/off, domain on/off, margin on/off - per-viewer overlay presentation, re-derived
+from the additive `Detection` fields, **no API route**; plus a read-only view of
+the active `config.policy`). `features/overlay.js` draws `unknown` dashed / muted
+/ labelled `Unknown`, box kept. `groups/diagnostics.js` gains per-rule rejection
+counters and the raw->decided list for the most recent frame. The shell, the
+registry and `static/ui/*` are untouched.
+
+## Contract change
+
+`Detection` gained `raw_class_name: str`, `policy_state: str`, `runner_up:
+tuple[str, float] | None` - additive, defaulted, no rename/reshape (see
+`docs/decisions.md`). `StateSnapshot.metrics` gained `policy_*` keys only.
+
+## Still absent after Phase 2.5
+
+No tracker, association, `Relation`, temporal state, risk, alert policy, TTS -
+`StateSnapshot.tracks` is still `[]`. No object-enrollment UI, no training or
+fine-tuning. `unknown` reduces confident errors but adds no new class - objects
+outside the model's vocabulary (watch, spectacles, charger, headphones, shaker)
+stay unrecognised until a custom-trained model in a later phase.

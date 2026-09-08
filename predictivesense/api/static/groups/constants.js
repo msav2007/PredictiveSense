@@ -4,7 +4,7 @@
  * here, so the panel layout never has to be renegotiated. Reserved ids have
  * their slot held until the phase that owns them fills it - dropping in without
  * moving anything else. Phase 2 fills `analysis` (Detection + Pose sub-modules);
- * `alerts` and `research` are still reserved.
+ * Phase 2.5 fills `research` (labelling + evaluation); `alerts` is still reserved.
  */
 "use strict";
 
@@ -15,15 +15,14 @@ export const GROUP_ORDER = {
   dataset: 40,
   analysis: 50, // Phase 2: Detection + Pose
   alerts: 60, // reserved
-  research: 70, // reserved
+  research: 70, // Phase 2.5: labelling + evaluation
   diagnostics: 100, // always last
 };
 
-/** Still declared but never passed to registerGroup(). `analysis` was reserved
- *  in Phase 1.6 and is filled by Phase 2 (groups/analysis.js). */
-export const RESERVED_GROUP_IDS = ["alerts", "research"];
+/** Still declared but never passed to registerGroup(). `analysis` was filled by
+ *  Phase 2, `research` by Phase 2.5; only `alerts` stays reserved. */
+export const RESERVED_GROUP_IDS = ["alerts"];
 
 export const RESERVED_GROUPS = [
   { id: "alerts", title: "Alerts", order: GROUP_ORDER.alerts },
-  { id: "research", title: "Research", order: GROUP_ORDER.research },
 ];

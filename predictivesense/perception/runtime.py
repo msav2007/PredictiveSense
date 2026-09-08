@@ -108,8 +108,15 @@ def create_session(
     requested = [ep] if ep == _CPU_EP else [ep, _CPU_EP]
     so = ort.SessionOptions()
     so.log_severity_level = 3  # warnings+; keep provider-init noise down
+    # Thread options are set EXPLICITLY (BLOCK 3.5.21), not left to ORT's
+    # defaults: two sessions + the loop's own threads over-subscribe an 18-thread
+    # machine badly (measured in Phase 2). intra_op is swept; inter_op is pinned
+    # to 1 and the graph runs sequentially - there is only one output to produce
+    # per call, so parallel op scheduling only adds contention here.
     if intra_op_threads and intra_op_threads > 0:
         so.intra_op_num_threads = int(intra_op_threads)
+    so.inter_op_num_threads = 1
+    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     session = ort.InferenceSession(str(path), sess_options=so, providers=requested)
 
     active = session.get_providers()
