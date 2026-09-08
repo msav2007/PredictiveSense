@@ -277,3 +277,14 @@ html, body { max-width: 100%; overflow-x: hidden; }
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 select, .readout, .kv-list dd { overflow: hidden; text-overflow: ellipsis; }
+
+/* Phase 5: unfitted-threshold notice + recognition-detail table (Diagnostics). */
+.warn-note { color: var(--warn); border-left: 3px solid var(--warn); padding-left: 8px; }
+.warn-note strong { color: var(--warn); }
+.rd-table { margin: 6px 0 0; font-size: 11px; overflow-x: auto; }
+.rd-row {
+  display: grid; grid-template-columns: 1.1fr 1fr 0.5fr 1fr 1.6fr 0.5fr; gap: 6px;
+  padding: 2px 0; border-bottom: 1px solid var(--line);
+}
+.rd-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
+.rd-row.rd-head span { color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.5px; }

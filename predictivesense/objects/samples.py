@@ -66,6 +66,17 @@ class ObjectSample:
     git_commit: str = ""
     consent_ack: bool = False
     thumb_path: str | None = None
+    # -- Phase 5 capture-quality provenance (all additive, defaults keep older
+    #    manifests valid) -------------------------------------------------
+    # Which browser API produced the frame: "imagebitmap" | "videoframe" |
+    # "element" (a fall-back drawImage(<video>)) | "upload".
+    capture_path: str | None = None
+    # "WxH" the browser was asked for, and "WxH" actually stored (authoritative -
+    # taken from the decoded image, never trusted from the client).
+    requested_resolution: str | None = None
+    achieved_resolution: str | None = None
+    encoded_quality: float | None = None  # JPEG quality the original is stored at
+    original_bytes: int | None = None  # size on disk of the full-resolution original
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -173,6 +184,10 @@ class SampleStore:
         original_filename: str | None = None,
         consent_ack: bool = False,
         thumb_bytes: bytes | None = None,
+        capture_path: str | None = None,
+        requested_resolution: str | None = None,
+        achieved_resolution: str | None = None,
+        encoded_quality: float | None = None,
     ) -> ObjectSample:
         validate_role(role)
         conds = validate_conditions(conditions)
@@ -189,6 +204,9 @@ class SampleStore:
         if thumb_bytes:
             thumb_rel = f"images/{sample_id}.thumb.jpg"
             (self._dir / thumb_rel).write_bytes(thumb_bytes)
+        # Never let the thumbnail stand in for the original (BLOCK 3.23 / 10).
+        if thumb_rel and thumb_bytes == image_bytes:
+            raise ObjectStoreError("thumbnail bytes must not equal the original bytes")
 
         sample = ObjectSample(
             sample_id=sample_id,
@@ -208,6 +226,11 @@ class SampleStore:
             git_commit=_git_commit(),
             consent_ack=bool(consent_ack),
             thumb_path=thumb_rel,
+            capture_path=capture_path,
+            requested_resolution=requested_resolution,
+            achieved_resolution=achieved_resolution or f"{int(width)}x{int(height)}",
+            encoded_quality=(float(encoded_quality) if encoded_quality is not None else None),
+            original_bytes=len(image_bytes),
         )
         doc = self._load()
         doc["samples"].append(sample.to_dict())

@@ -668,3 +668,87 @@ none placeheld. `StateSnapshot.tracks` is still `[]`. Recognition is byte-for-by
 unchanged: Phase 4 touched no perception or policy code. The object dataset is
 empty until the developer collects it; watch / spectacles / charger / headphones
 / shaker remain unrecognised until a custom model is trained in a later phase.
+
+# Phase 5 - recognition trust & Studio repair
+
+## Three-tier class vocabulary (replaces the whitelist)
+
+`predictivesense/perception/vocabulary.py` (stdlib only, imports only
+`perception.classes`) defines the partition and the lookup:
+
+```
+primary      14 classes the MVP safety scenarios depend on   -> shown normally
+secondary    26 classes plausible in an indoor room          -> shown, de-emphasised
+implausible  40 outdoor / animal / food / sports classes     -> suppressed
+```
+
+`primary + secondary + implausible` is a **total, disjoint partition of COCO-80**
+(the shipped detector's vocabulary). `validate_partition()` fails loudly (BLOCK
+10) on a typo, a duplicate, an overlap, or an unassigned class;
+`PolicyVocabularyConfig` runs it as a `model_validator` so a broken profile is a
+`ValidationError` at load. A class the detector emits that is in no tier (only
+possible with a non-COCO model) resolves to `unlisted` and is shown normally, so
+the general model keeps working out of the box with no enrolment. Tier
+assignment is an environment-specific judgement (`docs/decisions.md`), cheap to
+revise once labelled data exists.
+
+`config.policy.domain_classes` is now a `@computed_field` = the `primary` tier,
+kept so `dataset/` (COCO categories), the eval harness, `api/labels.py` and
+`/api/config` consumers need no reshaping.
+
+## Suppressed != unknown
+
+`RecognitionPolicy.apply` now classifies each detection into one of six
+`policy_state` values that reconcile exactly
+(`accepted + accepted_secondary + unknown + suppressed_implausible +
+rejected_size == input`):
+
+| state | meaning | overlay |
+|---|---|---|
+| `accepted` | primary/unlisted, confident | class label + score |
+| `accepted_secondary` | secondary tier, confident | class label, de-emphasised |
+| `unknown_low_confidence` | below the per-class threshold | box, label **exactly `Unknown`** |
+| `unknown_margin` | top-1/top-2 within `margin_min` | box, label **exactly `Unknown`** |
+| `suppressed_implausible` | confident, but an implausible-tier class | **hidden** (Diagnostics-only reveal) |
+| `rejected_size` | box too small / aspect implausible | hidden |
+
+`Detection` gained an additive `tier` field (`primary|secondary|implausible|
+unlisted`). The main overlay label for an unknown detection is exactly `Unknown`
+- no `(was Clock)`. All of decision / raw class / confidence / runner-up / rule
+that fired / effective threshold is **relocated, not deleted**, to the
+Diagnostics group (per-detection "Recognition detail" table + a click-to-select
+inspector on the overlay). `suppressed_implausible` is never shown as `Unknown`;
+a Diagnostics-only toggle (`policy.js` view state, no API route) reveals those
+boxes muted and labelled with the raw class.
+
+## Honesty about unfitted thresholds
+
+`policy.thresholds_fitted` (default `false`) is set to `true` **only** by
+`scripts/fit_thresholds.py` after a labelled `val` split exists. While it is
+`false` the Analysis -> Detection panel shows a `warn-note` ("thresholds are
+unfitted defaults") and the Diagnostics group labels them `UNFITTED`.
+`fit_thresholds.py` refuses an unlabelled / empty split before touching the
+detector or writing anything, naming exactly what is missing.
+
+## Studio repair
+
+`static/studio/studio-state.js` - an explicit `browsing | object_selected |
+capturing | reviewing` state machine (transitions `select`, `capture`, `review`,
+`back_to_camera`, `save_and_return`, `discard`; one owner, `hasPending()` guard).
+`studio.js` is now a pure render of `(state, context)` - no page reload, no
+forced re-fetch to paper over state. Root causes of the three reported faults
+and their fixes are in `docs/phase-reports/phase5.md`. Studio capture reuses the
+**same** `getUserMedia` constraints as the monitoring preview
+(`1280x720@30`, then `getCapabilities()` -> `applyConstraints()` up to 1920 ->
+`getSettings()`), captures from an `ImageBitmap` of the live track at full
+achieved resolution, and stores the full-resolution original (a JPEG upload kept
+verbatim, no re-compression) with a **separate** thumbnail. Sample provenance
+gained `capture_path`, `requested_resolution`, `achieved_resolution`
+(authoritative, from the decoded image), `encoded_quality`, `original_bytes`.
+
+## Still absent after Phase 5
+
+No model trained or fine-tuned; recognition of watch / spectacles / charger /
+headphones / shaker is unchanged. No tracker, `Relation`, temporal state, risk,
+alert policy, TTS - none started. `StateSnapshot.tracks` is still `[]`. No Scene
+Snapshot Studio (Phase 6).

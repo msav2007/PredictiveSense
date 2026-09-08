@@ -432,3 +432,105 @@ state, risk, or voice; no training or fine-tuning.
   FFmpeg build can read, so `ClipManifest.duration_s` is stored `null` (handled
   gracefully everywhere). Environmental, larger than this phase - documented in
   `docs/phase-reports/phase4.md`, save location and manifest format unchanged.
+
+## Phase 5 - recognition trust & Studio repair (2026-09-08)
+
+### Policy rule audit (BLOCK 3.1) - intent vs actual, on unlabelled footage
+
+`scripts/policy_audit.py --source data/raw --frames 400` (`results/policy_audit_raw.md`).
+481 raw detections; **frequencies, not accuracy**.
+
+- **domain restriction** (was: reject any class outside a 14-entry whitelist).
+  Intended to reject classes that cannot be in an indoor cabin scene; was
+  actually rejecting every emitted class outside the 14 - `couch` (3), `umbrella`
+  (20) on this clip - and showing them as "Unknown (was Sofa)". Parameter
+  support: none (a judgement call). **Change:** replaced by a three-tier
+  partition; only the `implausible` tier is suppressed. Now only `surfboard` (5)
+  is suppressed on this clip; `couch`/`umbrella` show de-emphasised.
+- **per-class threshold** (`default_threshold` 0.35, `per_class_thresholds` {}).
+  Rejected 0/481 at 0.35 on this clip. Parameter support: none - unfitted
+  placeholder. **Change:** value unchanged; added `policy.thresholds_fitted`
+  (false) so the UI stops presenting it as fitted, and `fit_thresholds.py`
+  refuses an unlabelled split.
+- **top-2 margin** (`margin_min` 0.10). Rejected 1/481 on this clip. Parameter
+  support: none - prompt placeholder. **Change:** value unchanged, labelled
+  unfitted.
+- **size / aspect** (`min_box_area_frac` 0.0005, `aspect_ratio_bounds` {}).
+  Rejected 0/481. A geometric sanity floor, not fitted. **Change:** none.
+
+### Decisions
+
+- **The `domain_classes` whitelist is replaced by a three-tier partition**
+  (`policy.vocabulary.primary`/`secondary`/`implausible`), a total disjoint
+  partition of COCO-80 validated at config load (typo / duplicate / overlap / gap
+  -> `ValidationError`). `primary` and `secondary` are both shown (secondary
+  de-emphasised and flagged); only `implausible` is suppressed. Rationale: the
+  product must work out of the box on the general model - no enrolment of
+  `person`/`laptop`/`keyboard` first. Canonical tier lists live in
+  `perception/vocabulary.py` (stdlib-only); config defaults pull them in via
+  `default_factory` (deferred import - avoids a settings<->perception cycle).
+- **Tier assignment is an environment-specific judgement, not a measured result**,
+  cheap to revise once labelled data exists. primary = 14 MVP-scenario classes;
+  secondary = 26 indoor furniture/appliance/tableware/wearable/pet classes;
+  implausible = 40 outdoor-vehicle/street/animal/sports/food classes.
+- **`config.policy.domain_classes` kept as a `@computed_field` = the `primary`
+  tier** (Phase 0 additive rule). Keeps `dataset/coco_store`, `_eval_common`,
+  `fit_thresholds.py`, `eval_detection.py`, `api/labels.py` and `/api/config`
+  working unchanged; the existing `data/eval` store still reconciles.
+- **`Detection` gained one additive field `tier: str = "primary"`**
+  (`primary|secondary|implausible|unlisted`). The policy always sets it, even on
+  `accepted` and the disabled pass-through.
+- **`policy_state` is a six-value set**; `rejected_out_of_domain` -> renamed
+  `suppressed_implausible` (the model recognised a known class; calling that
+  "Unknown" is a category error). Set: `accepted`, `accepted_secondary` (new),
+  `unknown_low_confidence`, `unknown_margin`, `suppressed_implausible`,
+  `rejected_size`. `PolicyCounts` reconciles
+  `accepted + accepted_secondary + unknown + suppressed_implausible +
+  rejected_size == input`. `StateSnapshot.metrics` policy keys renamed to match
+  (`policy_suppressed_implausible`, new `policy_accepted_secondary`) - keys only.
+- **Main overlay label for an unknown detection is exactly `Unknown`** - no
+  `(was Clock)`, no raw class, no rule name. Decision / raw class / confidence /
+  runner-up / rule that fired / effective threshold / tier are **relocated, not
+  deleted**, to Diagnostics: a per-detection "Recognition detail" table for the
+  latest frame plus a click-to-select inspector (the overlay wrapper hit-tests
+  the last-drawn boxes; the canvas keeps `pointer-events:none`).
+  `suppressed_implausible` boxes are hidden on the main overlay; a
+  Diagnostics-only view toggle (`policy.js` localStorage state, no API route)
+  reveals them muted with the raw class.
+- **`policy.thresholds_fitted` (bool, default false)** set to `true` only by
+  `scripts/fit_thresholds.py`. While false the Analysis -> Detection panel shows a
+  `warn-note` and Diagnostics labels the thresholds `UNFITTED`. `fit_thresholds.py`
+  checks the COCO store's labelled count first and refuses an unlabelled / empty
+  split before touching the detector or writing any file.
+- **`scripts/policy_audit.py`** is the Phase 5 evidence script (per-state and
+  per-raw-class counts, per-state confidence distribution, top implausible
+  suppressions, synthetic-noise control). `scripts/policy_effect.py` kept and
+  updated to the new state names.
+- **Studio: an explicit `browsing | object_selected | capturing | reviewing`
+  state machine** (`static/studio/studio-state.js`; transitions `select`,
+  `capture`, `review`, `back_to_camera`, `save_and_return`, `discard`; one owner,
+  `hasPending()` guard). `studio.js` renders the DOM as a pure function of it -
+  no reload, no forced re-fetch. Root causes of the three faults: (a) *Back to
+  camera* left `editingSampleId` / the inspected box coords stale and never
+  re-centred; (b) *re-selecting an object* never hid the dynamically created
+  `#inspect-actions` bar or reset the stage; (c) *Save & Return* called `leave()`
+  directly with no pending-capture check. Fixes: `back_to_camera`/`discard` reset
+  the transient context but keep `objectId`; `select` fully resets;
+  `save_and_return` is `hasPending()`-guarded and `saveAndReturn()` `window.confirm`s
+  before discarding, with a `beforeunload` backstop.
+- **Studio capture reuses the monitoring preview's acquisition path** -
+  `getUserMedia({width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30}})`,
+  then `getCapabilities()` -> `applyConstraints()` up to 1920 -> `getSettings()`,
+  requested vs achieved recorded. The frame is `createImageBitmap()` of the live
+  `<video>` track at full `videoWidth/Height` (`capture_path` `imagebitmap` /
+  `element` fallback), stored as the full-resolution original. A JPEG upload is
+  stored **verbatim** (no re-compression - BLOCK 3.23); other formats -> JPEG q92
+  once. The thumbnail is a separate smaller file; `SampleStore.add` refuses if
+  its bytes equal the original's. New additive `ObjectSample` provenance:
+  `capture_path`, `requested_resolution`, `achieved_resolution` (authoritative -
+  from the decoded image), `encoded_quality`, `original_bytes`.
+- **`benchmark_latency.py` gained an end-to-end capture -> snapshot loopback**:
+  the real FastAPI app + browser-ingest + perception + policy, frames over
+  `/ws/ingest` with a real capture clock, `frame_age_ms` from `/ws/state`, plus
+  CPU% / RSS. Run in a clean subprocess so cumulative in-process ORT-session
+  contention (which skews the legacy thread sweep) does not skew it.

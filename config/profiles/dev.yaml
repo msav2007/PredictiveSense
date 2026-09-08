@@ -111,30 +111,49 @@ perception:
   # default (no behaviour change until measured to help on this machine).
   pose_requires_person: false
 
-# Phase 2.5 recognition policy - suppresses out-of-domain classes and rejects
-# weakly-supported predictions as `unknown`. Sits after the detector, before the
-# snapshot; the detector itself is unchanged. Every rule is switchable and every
-# outcome counted (accepted + unknown + rejected == input count). enabled:false
-# reproduces Phase 2 exactly.
+# Phase 2.5 recognition policy, redesigned in Phase 5. Sits after the detector,
+# before the snapshot; the detector itself is unchanged. Every rule is switchable
+# and every outcome counted - the six policy_state values reconcile exactly.
+# enabled:false reproduces Phase 2 exactly.
+#
+# Phase 5: the binary whitelist is replaced by three tiers. primary + secondary +
+# implausible must be a total, disjoint partition of the detector's COCO-80
+# vocabulary (validated at load - a typo / duplicate / gap fails loudly). primary
+# and secondary are BOTH shown on the overlay (secondary de-emphasised); only
+# implausible is suppressed. This keeps the general model useful out of the box -
+# person, laptop, keyboard, chair, bottle, cup, clock, tv all work with no
+# enrolment. Tier assignment is an environment-specific JUDGEMENT, not a measured
+# result - see docs/decisions.md; cheap to revise once labelled data exists.
 policy:
   enabled: true
-  domain_restriction: true
+  domain_restriction: true      # suppress the `implausible` tier
   margin_rule: true
   size_rule: true
   per_class_threshold_rule: true
-  # Plausible in this indoor cabin scene. Every entry must be a COCO-80 class the
-  # shipped detector can emit (validated - a typo fails loudly).
-  domain_classes: [person, cup, bottle, laptop, keyboard, mouse, chair, book,
-                   cell phone, backpack, handbag, scissors, bowl, remote]
-  # Fitted on the `val` split by scripts/fit_thresholds.py - see
-  # results/fit_thresholds_val.md. Empty until the developer labels and the fit
-  # is run; default_threshold is the explicit fallback (a judgement call,
-  # documented in docs/decisions.md).
+  vocabulary:
+    primary: [person, cup, bottle, laptop, keyboard, mouse, chair, book,
+              cell phone, backpack, handbag, scissors, bowl, remote]
+    secondary: [clock, tv, bed, couch, dining table, sink, potted plant, vase,
+                refrigerator, microwave, oven, toaster, toilet, teddy bear,
+                hair drier, toothbrush, wine glass, fork, knife, spoon, bench,
+                umbrella, tie, suitcase, cat, dog]
+    implausible: [bicycle, car, motorcycle, airplane, bus, train, truck, boat,
+                  traffic light, fire hydrant, stop sign, parking meter, bird,
+                  horse, sheep, cow, elephant, bear, zebra, giraffe, frisbee,
+                  skis, snowboard, sports ball, kite, baseball bat,
+                  baseball glove, skateboard, surfboard, tennis racket, banana,
+                  apple, sandwich, orange, broccoli, carrot, hot dog, pizza,
+                  donut, cake]
+  # UNFITTED until scripts/fit_thresholds.py runs on a labelled `val` split; the
+  # UI states this plainly. per_class_thresholds / default_threshold / margin_min
+  # below are placeholder defaults (judgement calls, documented in decisions.md).
+  thresholds_fitted: false
   per_class_thresholds: {}
   default_threshold: 0.35
-  margin_min: 0.10               # top1 - top2 below this -> unknown (fit on val)
+  margin_min: 0.10               # top1 - top2 below this -> unknown (unfitted)
   min_box_area_frac: 0.0005
   emit_unknown: true             # unknown keeps its box (BLOCK 3.14)
+  show_suppressed_in_diagnostics: true
   aspect_ratio_bounds: {}        # per-class w/h sanity bounds; opt-in, see decisions.md
 
 # Phase 2.5 labelled evaluation set (COCO detection JSON) + eval harness.

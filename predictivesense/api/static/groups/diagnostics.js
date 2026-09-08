@@ -5,11 +5,19 @@
  */
 "use strict";
 
-import { runtime } from "/static/features/runtime.js";
-import { el, actionButton } from "/static/ui/controls.js";
+import { runtime, on } from "/static/features/runtime.js";
+import { el, actionButton, settingRow } from "/static/ui/controls.js";
 import { fmtNum } from "/static/ui/format.js";
 import { GROUP_ORDER } from "/static/groups/constants.js";
 import { initMetrics } from "/static/features/metrics.js";
+import { isPolicyView, setPolicyView, ruleLabel, thresholdFor } from "/static/features/policy.js";
+
+// Detection selected on the overlay (click) - full detail shown below.
+let selectedDetection = null;
+on("detection-selected", (ev) => {
+  selectedDetection = (ev.detail && ev.detail.detection) || null;
+  renderSelectedDetail(runtime.lastSnapshot);
+});
 
 export const id = "diagnostics";
 export const title = "Diagnostics";
@@ -92,6 +100,25 @@ export function render(body) {
     );
   }
   body.append(polgrid);
+
+  // Diagnostics-only reveal of `suppressed_implausible` boxes on the overlay
+  // (BLOCK 3.8) - never shown on the main overlay.
+  const supToggle = el("input", { type: "checkbox", id: "policy-show-suppressed" });
+  supToggle.checked = isPolicyView("suppressed");
+  supToggle.addEventListener("change", () => setPolicyView("suppressed", supToggle.checked));
+  body.append(settingRow("Reveal suppressed (implausible) boxes", supToggle));
+
+  // Full per-detection recognition detail (BLOCK 3.11): decision, raw class,
+  // confidence, runner-up, rule that fired, effective threshold. Nothing is
+  // deleted - it is relocated here from the overlay label.
+  body.append(el("p", { class: "subhead", text: "Recognition detail" }));
+  body.append(el("p", { class: "note", text: "Selected detection (click a box on the overlay):" }));
+  body.append(el("div", { id: "rd-selected", class: "kv-list" }, [
+    el("div", {}, [el("dt", { text: "—" }), el("dd", { text: "none selected" })]),
+  ]));
+  body.append(el("p", { class: "note", text: "Most recent frame — every detection:" }));
+  body.append(el("div", { id: "rd-lastframe", class: "rd-table" }, [el("p", { class: "note", text: "—" })]));
+
   body.append(el("p", { class: "note", text: "raw → decided (last frame):" }));
   body.append(el("ul", { class: "line-list", id: "policy-raw-decided" }, [
     el("li", { text: "—" }),
@@ -142,12 +169,13 @@ const PERCEPTION_METRICS = [
   ["perception_frame_errors", "Perception frame errors"],
 ];
 
-// Phase 2.5 policy counters (cumulative) + per-frame cost.
+// Recognition policy counters (cumulative) + per-frame cost. Phase 5 six states.
 const POLICY_METRICS = [
   ["policy_accepted", "Accepted (cum.)"],
+  ["policy_accepted_secondary", "Accepted · secondary tier"],
   ["policy_unknown_low_confidence", "Unknown · low confidence"],
   ["policy_unknown_margin", "Unknown · margin"],
-  ["policy_rejected_out_of_domain", "Rejected · out of domain"],
+  ["policy_suppressed_implausible", "Suppressed · implausible tier"],
   ["policy_rejected_size", "Rejected · size"],
   ["policy_errors", "Policy errors"],
   ["policy_ms", "Policy cost (ms)"],
@@ -203,4 +231,96 @@ export function update(state) {
         : [el("li", { text: "no changes this frame" })]),
     );
   }
+
+  renderSelectedDetail(state && state.snapshot);
+  renderRecognitionLastFrame(state && state.snapshot);
+}
+
+function iou(a, b) {
+  const x1 = Math.max(a[0], b[0]);
+  const y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[2], b[2]);
+  const y2 = Math.min(a[3], b[3]);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter;
+  return ua > 0 ? inter / ua : 0;
+}
+
+function detailRows(d) {
+  const runner = d.runner_up ? `${d.runner_up[0]} ${(d.runner_up[1] * 100).toFixed(0)}%` : "—";
+  const decision =
+    d.policy_state === "accepted" || d.policy_state === "accepted_secondary"
+      ? d.class_name
+      : "Unknown / hidden";
+  return [
+    kv("decision", decision),
+    kv("raw class", d.raw_class_name || d.class_name),
+    kv("tier", d.tier || "primary"),
+    kv("confidence", `${(d.score * 100).toFixed(1)}%`),
+    kv("runner-up", runner),
+    kv("policy_state", d.policy_state || "accepted"),
+    kv("rule that fired", ruleLabel(d.policy_state)),
+    kv("effective threshold", String(thresholdFor(d))),
+  ];
+}
+
+function renderSelectedDetail(snapshot) {
+  const host = document.getElementById("rd-selected");
+  if (!host) return;
+  let d = selectedDetection;
+  // re-match the click against the current frame's detections by box overlap
+  if (d && snapshot && Array.isArray(snapshot.detections)) {
+    let best = null;
+    let bestIoU = 0.4;
+    for (const cand of snapshot.detections) {
+      const s = iou(cand.bbox, d.bbox);
+      if (s > bestIoU) {
+        bestIoU = s;
+        best = cand;
+      }
+    }
+    if (best) d = best;
+  }
+  if (!d) {
+    host.replaceChildren(el("div", {}, [el("dt", { text: "—" }), el("dd", { text: "none selected" })]));
+    return;
+  }
+  host.replaceChildren(...detailRows(d));
+}
+
+function renderRecognitionLastFrame(snapshot) {
+  const host = document.getElementById("rd-lastframe");
+  if (!host) return;
+  const dets = (snapshot && snapshot.detections) || [];
+  if (!dets.length) {
+    host.replaceChildren(el("p", { class: "note", text: "no detections this frame" }));
+    return;
+  }
+  const rows = [
+    el("div", { class: "rd-row rd-head" }, [
+      el("span", { text: "decision" }),
+      el("span", { text: "raw" }),
+      el("span", { text: "conf" }),
+      el("span", { text: "runner-up" }),
+      el("span", { text: "rule" }),
+      el("span", { text: "thr" }),
+    ]),
+  ];
+  for (const d of dets.slice(0, 20)) {
+    const decision =
+      d.policy_state === "accepted" || d.policy_state === "accepted_secondary"
+        ? d.class_name
+        : "Unknown";
+    rows.push(
+      el("div", { class: "rd-row" }, [
+        el("span", { text: decision }),
+        el("span", { text: d.raw_class_name || d.class_name }),
+        el("span", { text: `${(d.score * 100).toFixed(0)}%` }),
+        el("span", { text: d.runner_up ? `${d.runner_up[0]} ${(d.runner_up[1] * 100).toFixed(0)}%` : "—" }),
+        el("span", { text: ruleLabel(d.policy_state) }),
+        el("span", { text: String(thresholdFor(d)) }),
+      ]),
+    );
+  }
+  host.replaceChildren(...rows);
 }

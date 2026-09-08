@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 from pydantic import ValidationError as _PydanticValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -31,6 +31,7 @@ __all__ = [
     "DetectorConfig",
     "PoseConfig",
     "PerceptionConfig",
+    "PolicyVocabularyConfig",
     "PolicyConfig",
     "DatasetConfig",
     "EvalConfig",
@@ -57,6 +58,24 @@ def default_profiles_dir() -> Path:
 
 class _Section(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+def _tier_default(tier: str) -> tuple[str, ...]:
+    """Default class list for one policy vocabulary tier.
+
+    Deferred import: ``perception.vocabulary`` is stdlib-only but importing it
+    at this module's load time would pull in ``perception/__init__`` ->
+    ``perception.engine`` -> ``config.settings`` (a cycle). Called only from a
+    ``default_factory``, i.e. at config instantiation, when both modules exist.
+    """
+
+    from predictivesense.perception import vocabulary as _vocab
+
+    return {
+        "primary": _vocab.PRIMARY_TIER,
+        "secondary": _vocab.SECONDARY_TIER,
+        "implausible": _vocab.IMPLAUSIBLE_TIER,
+    }[tier]
 
 
 class LoggingConfig(_Section):
@@ -258,31 +277,58 @@ class PerceptionConfig(_Section):
     pose_requires_person: bool = False
 
 
-class PolicyConfig(_Section):
-    """Phase 2.5 recognition policy layer - sits AFTER the detector and BEFORE
-    the snapshot. Every rule is independently switchable and every outcome is
-    counted; ``accepted + unknown + rejected == input count`` always holds. With
-    ``enabled=False`` the pipeline behaves exactly as Phase 2 did.
+class PolicyVocabularyConfig(_Section):
+    """Phase 5 three-tier class vocabulary - replaces the Phase 2.5
+    ``domain_classes`` whitelist.
 
-    Defaults for ``per_class_thresholds`` / ``margin_min`` are fitted on the
-    ``val`` split by ``scripts/fit_thresholds.py`` - see the profile comments
-    that name the justifying result file. ``default_threshold`` is an explicit
-    fallback only.
+    ``primary`` + ``secondary`` + ``implausible`` must be a **total, disjoint
+    partition** of the shipped detector's class list (COCO-80). A typo, a
+    duplicate, an overlap, or an unassigned class fails loudly at config load
+    (BLOCK 10). The defaults are an environment-specific judgement, not a
+    measured result (``docs/decisions.md``); revising them is cheap.
+    """
+
+    # The canonical tier lists live in perception.vocabulary (stdlib-only). They
+    # are pulled in via default_factory (at instantiation, not class-body) to
+    # avoid a settings <- perception import cycle at module load.
+    primary: tuple[str, ...] = Field(default_factory=lambda: _tier_default("primary"))
+    secondary: tuple[str, ...] = Field(default_factory=lambda: _tier_default("secondary"))
+    implausible: tuple[str, ...] = Field(default_factory=lambda: _tier_default("implausible"))
+
+    @model_validator(mode="after")
+    def _partition_is_total_and_disjoint(self) -> "PolicyVocabularyConfig":
+        from predictivesense.perception.vocabulary import validate_partition
+
+        validate_partition(self.primary, self.secondary, self.implausible)
+        return self
+
+
+class PolicyConfig(_Section):
+    """Recognition policy layer (Phase 2.5, redesigned in Phase 5) - sits AFTER
+    the detector and BEFORE the snapshot. Every rule is independently switchable
+    and every outcome is counted; the six ``policy_state`` values reconcile
+    exactly (every input detection maps to one). ``enabled=False`` is a
+    pass-through and the pipeline behaves exactly as Phase 2 did.
+
+    Phase 5: the binary ``domain_classes`` whitelist is replaced by three tiers
+    (``vocabulary``). ``suppressed_implausible`` (a confident prediction of a
+    class that cannot be here) is now distinct from ``unknown`` (the model is
+    unsure *what* the object is). ``thresholds_fitted`` is ``False`` until
+    ``scripts/fit_thresholds.py`` runs on a labelled ``val`` split; while it is
+    ``False`` the UI states plainly that the thresholds are unfitted defaults.
     """
 
     enabled: bool = True
+    # Phase 5: suppress the `implausible` tier (was: reject out-of-domain).
     domain_restriction: bool = True
     margin_rule: bool = True
     size_rule: bool = True
     per_class_threshold_rule: bool = True
-    # Classes plausible in this indoor cabin scene. Anything the model emits
-    # outside this set is rejected as out-of-domain. Validated against COCO-80
-    # (the shipped detector's vocabulary) so a typo fails loudly (BLOCK 10).
-    domain_classes: tuple[str, ...] = (
-        "person", "cup", "bottle", "laptop", "keyboard", "mouse", "chair",
-        "book", "cell phone", "backpack", "handbag", "scissors", "bowl",
-        "remote",
-    )
+    vocabulary: PolicyVocabularyConfig = Field(default_factory=PolicyVocabularyConfig)
+    # Set true ONLY by scripts/fit_thresholds.py after a labelled `val` split
+    # exists. While false, per_class_thresholds / default_threshold / margin_min
+    # are unfitted defaults and the UI says so (BLOCK 3.5).
+    thresholds_fitted: bool = False
     per_class_thresholds: dict[str, float] = Field(default_factory=dict)
     default_threshold: float = Field(gt=0.0, le=1.0, default=0.35)
     # top1 - top2 below this -> emit `unknown` instead of the top-1 guess.
@@ -291,9 +337,22 @@ class PolicyConfig(_Section):
     # A rejected-but-real detection keeps its box and renders as `unknown`
     # (BLOCK 3.14). Setting this false discards the box - not recommended.
     emit_unknown: bool = True
+    # Reveal `suppressed_implausible` detections in the Diagnostics-only overlay
+    # toggle. Never on the main overlay (BLOCK 3.8).
+    show_suppressed_in_diagnostics: bool = True
     # Per-class aspect-ratio sanity bound (w/h), applied only to classes listed.
     # Empty by default - a judgement call, documented in decisions.md.
     aspect_ratio_bounds: dict[str, tuple[float, float]] = Field(default_factory=dict)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def domain_classes(self) -> tuple[str, ...]:
+        """Back-compat alias: the classes the MVP scenarios depend on and that
+        the evaluation set / threshold fitting are scoped to = the ``primary``
+        tier. Kept so the dataset store, eval harness and ``/api/config``
+        consumers do not need reshaping (Phase 0 additive rule)."""
+
+        return tuple(self.vocabulary.primary)
 
     @field_validator("per_class_thresholds")
     @classmethod
@@ -301,25 +360,6 @@ class PolicyConfig(_Section):
         for name, thr in value.items():
             if not (0.0 < thr <= 1.0):
                 raise ValueError(f"per_class_thresholds[{name!r}] must be in (0, 1]")
-        return value
-
-    @field_validator("domain_classes")
-    @classmethod
-    def _domain_classes_are_emittable(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        # Fail loudly on a domain_classes entry the shipped model cannot emit
-        # (BLOCK 10). Import here to avoid a settings <- perception import at
-        # module load; perception.classes is stdlib-only.
-        from predictivesense.perception.classes import COCO_CLASSES
-
-        unknown = [c for c in value if c not in set(COCO_CLASSES)]
-        if unknown:
-            raise ValueError(
-                f"policy.domain_classes entries not in the COCO-80 vocabulary: "
-                f"{unknown}. Fix the spelling or use a model whose `names` "
-                f"metadata includes them."
-            )
-        if not value:
-            raise ValueError("policy.domain_classes must not be empty")
         return value
 
     @field_validator("aspect_ratio_bounds")

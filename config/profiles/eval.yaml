@@ -90,21 +90,37 @@ perception:
     keypoint_visibility_threshold: 0.3
   pose_requires_person: false   # Phase 2.5 - see docs/phase-reports/phase2_5.md
 
-# Phase 2.5 - identical policy / dataset / eval settings to dev so real-time and
-# recorded modes run the same recognition policy code.
+# Phase 2.5 / Phase 5 - identical policy settings to dev so real-time and
+# recorded modes run the same recognition policy code. Three-tier vocabulary
+# (total, disjoint partition of COCO-80); primary + secondary shown, implausible
+# suppressed. Tiers are an environment-specific judgement (docs/decisions.md).
 policy:
   enabled: true
-  domain_restriction: true
+  domain_restriction: true      # suppress the `implausible` tier
   margin_rule: true
   size_rule: true
   per_class_threshold_rule: true
-  domain_classes: [person, cup, bottle, laptop, keyboard, mouse, chair, book,
-                   cell phone, backpack, handbag, scissors, bowl, remote]
-  per_class_thresholds: {}      # fitted on val by scripts/fit_thresholds.py (results/fit_thresholds_val.md)
+  vocabulary:
+    primary: [person, cup, bottle, laptop, keyboard, mouse, chair, book,
+              cell phone, backpack, handbag, scissors, bowl, remote]
+    secondary: [clock, tv, bed, couch, dining table, sink, potted plant, vase,
+                refrigerator, microwave, oven, toaster, toilet, teddy bear,
+                hair drier, toothbrush, wine glass, fork, knife, spoon, bench,
+                umbrella, tie, suitcase, cat, dog]
+    implausible: [bicycle, car, motorcycle, airplane, bus, train, truck, boat,
+                  traffic light, fire hydrant, stop sign, parking meter, bird,
+                  horse, sheep, cow, elephant, bear, zebra, giraffe, frisbee,
+                  skis, snowboard, sports ball, kite, baseball bat,
+                  baseball glove, skateboard, surfboard, tennis racket, banana,
+                  apple, sandwich, orange, broccoli, carrot, hot dog, pizza,
+                  donut, cake]
+  thresholds_fitted: false      # UNFITTED - scripts/fit_thresholds.py needs a labelled val split
+  per_class_thresholds: {}
   default_threshold: 0.35
   margin_min: 0.10
   min_box_area_frac: 0.0005
   emit_unknown: true
+  show_suppressed_in_diagnostics: true
   aspect_ratio_bounds: {}
 
 dataset:

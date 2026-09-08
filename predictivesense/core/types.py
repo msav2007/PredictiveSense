@@ -71,10 +71,17 @@ class Detection(_Frozen):
       until the policy relabels it).
     * ``class_name`` - unchanged field; after the policy it is what the policy
       decided, possibly ``"unknown"``.
-    * ``policy_state`` - ``accepted`` | ``unknown_low_confidence`` |
-      ``unknown_margin`` | ``rejected_out_of_domain`` | ``rejected_size``.
+    * ``policy_state`` - Phase 5 six-value set: ``accepted`` |
+      ``accepted_secondary`` | ``unknown_low_confidence`` | ``unknown_margin`` |
+      ``suppressed_implausible`` | ``rejected_size``. (Phase 2.5's
+      ``rejected_out_of_domain`` is renamed ``suppressed_implausible`` - the
+      model *did* recognise a known class, we chose not to surface it - recorded
+      in ``docs/decisions.md``.)
     * ``runner_up`` - ``(class_name, score)`` of the second-best class for this
       detection's anchor, or ``None`` when the model does not expose it.
+    * ``tier`` - Phase 5 three-tier vocabulary bucket the raw class falls in:
+      ``primary`` | ``secondary`` | ``implausible`` | ``unlisted``. Additive;
+      recorded in ``docs/decisions.md``.
 
     Defaults keep every pre-2.5 construction site valid.
     """
@@ -87,6 +94,7 @@ class Detection(_Frozen):
     raw_class_name: str = ""
     policy_state: str = "accepted"
     runner_up: tuple[str, float] | None = None
+    tier: str = "primary"
 
 
 class Pose(_Frozen):

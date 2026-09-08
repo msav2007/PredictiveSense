@@ -15,14 +15,18 @@
  */
 "use strict";
 
-import { runtime } from "/static/features/runtime.js";
+import { runtime, emit } from "/static/features/runtime.js";
 import { store } from "/static/ui/store.js";
 import { isLayerEnabled } from "/static/features/analysis-prefs.js";
-import { effectiveDetection } from "/static/features/policy.js";
+import { effectiveDetection, isPolicyView, onPolicyViewChange } from "/static/features/policy.js";
 
-// Muted styling for a policy `unknown` / rejected detection - visually distinct
-// from a confident detection and from nothing at all (BLOCK 3.14 / 3.24).
+// Muted styling for a policy `unknown` detection - visually distinct from a
+// confident detection and from nothing at all (BLOCK 3.14 / 3.24).
 const UNKNOWN_COLOUR = "rgb(148, 163, 184)";
+// Even more muted for a `secondary`-tier detection: shown, de-emphasised (BLOCK 3.3).
+const SECONDARY_COLOUR = "rgb(120, 133, 148)";
+// Faint dotted for a revealed `suppressed_implausible` box (Diagnostics only).
+const SUPPRESSED_COLOUR = "rgb(90, 100, 116)";
 
 // COCO 17-keypoint skeleton (mirrors perception/classes.py SKELETON_EDGES).
 const SKELETON_EDGES = [
@@ -35,6 +39,20 @@ let canvas = null;
 let ctx = null;
 let ro = null;
 let started = false;
+// Boxes drawn on the last frame, for click hit-testing (display px).
+let lastBoxes = [];
+// Selected detection's bbox (analysis-space), for the Diagnostics inspector.
+let selectedBBox = null;
+
+function iou(a, b) {
+  const x1 = Math.max(a[0], b[0]);
+  const y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[2], b[2]);
+  const y2 = Math.min(a[3], b[3]);
+  const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter;
+  return ua > 0 ? inter / ua : 0;
+}
 
 /** Deterministic per-class colour - mirrors perception/classes.py class_color. */
 function classColor(id) {
@@ -91,11 +109,32 @@ export function initOverlay() {
   resize(wrap);
 
   store.subscribe(() => draw());
+  onPolicyViewChange(() => draw());
   const video = document.getElementById("preview");
   if (video) {
     video.addEventListener("loadedmetadata", () => draw());
     video.addEventListener("resize", () => draw());
   }
+
+  // Click-to-select a detection: the resting overlay label stays "Unknown", but
+  // clicking a box reveals its full detail in the Diagnostics inspector
+  // (BLOCK 3.11 / 3.12). The canvas keeps pointer-events:none; we hit-test the
+  // last-drawn boxes on a listener attached to the layer's wrapper.
+  wrap.addEventListener("click", (ev) => {
+    const r = wrap.getBoundingClientRect();
+    const cx = ev.clientX - r.left;
+    const cy = ev.clientY - r.top;
+    let hit = null;
+    for (const b of lastBoxes) {
+      if (cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h) {
+        if (!hit || b.w * b.h < hit.w * hit.h) hit = b; // smallest box wins
+      }
+    }
+    selectedBBox = hit ? hit.det.bbox.slice() : null;
+    emit("detection-selected", { detection: hit ? hit.det : null });
+    draw();
+  });
+
   draw();
 }
 
@@ -145,9 +184,11 @@ function draw() {
   ctx.save();
   if (snap.stale) ctx.globalAlpha = 0.32;
 
+  lastBoxes = [];
   const band = runtime.config?.perception?.detector?.low_confidence_band || [0.35, 0.5];
+  const revealSuppressed = isPolicyView("suppressed");
   if (isLayerEnabled("detection")) {
-    for (const d of snap.detections || []) drawDetection(d, mapX, mapY, band);
+    for (const d of snap.detections || []) drawDetection(d, mapX, mapY, band, revealSuppressed);
   }
   if (isLayerEnabled("pose")) {
     const visThr =
@@ -165,39 +206,70 @@ function draw() {
   }
 }
 
-function drawDetection(d, mapX, mapY, band) {
+function drawDetection(d, mapX, mapY, band, revealSuppressed) {
+  const eff = effectiveDetection(d);
+
+  // rejected_size is always hidden; suppressed_implausible is hidden on the main
+  // overlay and only revealed by the Diagnostics-only toggle (BLOCK 3.8).
+  if (eff.kind === "rejected") return;
+  if (eff.kind === "suppressed" && !revealSuppressed) return;
+
   const [x1, y1, x2, y2] = d.bbox;
   const px = mapX(x1);
   const py = mapY(y1);
   const pw = mapX(x2) - px;
   const ph = mapY(y2) - py;
 
-  const eff = effectiveDetection(d);
-  const isUnknown = eff.kind !== "accepted";
-  const colour = isUnknown ? UNKNOWN_COLOUR : classColor(d.class_id);
-  const lowConf = !isUnknown && d.score >= band[0] && d.score < band[1];
-  const dashed = isUnknown || lowConf;
+  lastBoxes.push({ det: d, x: px, y: py, w: pw, h: ph });
+  const selected = selectedBBox && iou(selectedBBox, d.bbox) > 0.5;
+
+  let colour;
+  let alpha;
+  let dashPattern;
+  let resting;
+  if (eff.kind === "accepted") {
+    colour = classColor(d.class_id);
+    const lowConf = d.score >= band[0] && d.score < band[1];
+    alpha = lowConf ? 0.5 : 1.0;
+    dashPattern = lowConf ? [6, 4] : [];
+    resting = `${aliasFor(eff.label || d.class_name)} ${(d.score * 100).toFixed(0)}%`;
+  } else if (eff.kind === "secondary") {
+    colour = SECONDARY_COLOUR;
+    alpha = 0.62;
+    dashPattern = [5, 4];
+    resting = aliasFor(eff.label || d.raw); // its real class, de-emphasised
+  } else if (eff.kind === "suppressed") {
+    colour = SUPPRESSED_COLOUR;
+    alpha = 0.5;
+    dashPattern = [2, 3];
+    resting = `${aliasFor(eff.raw)} · suppressed`; // Diagnostics reveal only
+  } else {
+    // unknown_low_confidence / unknown_margin - the resting label is exactly
+    // "Unknown": no former-class annotation, no raw class, no rule name on the
+    // main overlay (BLOCK 3.10). Full detail lives in Diagnostics.
+    colour = UNKNOWN_COLOUR;
+    alpha = 0.55;
+    dashPattern = [6, 4];
+    resting = "Unknown";
+  }
 
   ctx.save();
-  ctx.strokeStyle = colour;
-  ctx.lineWidth = isUnknown ? 1.5 : lowConf ? 1.5 : 2.5;
-  ctx.globalAlpha *= isUnknown ? 0.55 : lowConf ? 0.5 : 1.0;
-  ctx.setLineDash(dashed ? [6, 4] : []);
+  ctx.strokeStyle = selected ? "#ffd166" : colour;
+  ctx.lineWidth = selected ? 3 : eff.kind === "accepted" && !dashPattern.length ? 2.5 : 1.5;
+  ctx.globalAlpha *= selected ? 1.0 : alpha;
+  ctx.setLineDash(dashPattern);
   ctx.strokeRect(px, py, pw, ph);
   ctx.setLineDash([]);
 
-  const label = isUnknown
-    ? `Unknown${eff.raw ? ` (was ${aliasFor(eff.raw)})` : ""}`
-    : `${aliasFor(eff.label || d.class_name)} ${(d.score * 100).toFixed(0)}%`;
   ctx.font = "12px ui-monospace, monospace";
-  const tw = ctx.measureText(label).width + 10;
+  const tw = ctx.measureText(resting).width + 10;
   const th = 16;
-  ctx.fillStyle = colour;
-  ctx.globalAlpha *= lowConf ? 0.6 : 0.9;
+  ctx.fillStyle = selected ? "#ffd166" : colour;
+  ctx.globalAlpha *= 0.9;
   ctx.fillRect(px, Math.max(0, py - th), tw, th);
   ctx.fillStyle = "#0b1220";
   ctx.globalAlpha = 1;
-  ctx.fillText(label, px + 5, Math.max(11, py - 4));
+  ctx.fillText(resting, px + 5, Math.max(11, py - 4));
 
   // short confidence bar under the label
   const barW = 40;

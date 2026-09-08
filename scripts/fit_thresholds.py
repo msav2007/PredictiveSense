@@ -85,6 +85,34 @@ def main(argv: list[str] | None = None) -> int:
         _LOG.error("configuration error: %s", exc)
         return 2
 
+    # BLOCK 3.14: refuse an unlabelled / empty split with a message naming
+    # exactly what is missing, before touching the detector or writing anything.
+    coco_path = Path(config.dataset.coco_path)
+    if not coco_path.is_file():
+        _LOG.error(
+            "cannot fit thresholds: no evaluation store at %s. "
+            "Run `python scripts/build_eval_frames.py` then label frames at /label.",
+            coco_path,
+        )
+        return 2
+    try:
+        from predictivesense.dataset.coco_store import CocoStore
+
+        _probe = CocoStore.load(coco_path)
+        _labelled = _probe.counts().get("labelled", 0)
+    except CocoStoreError as exc:
+        _LOG.error("evaluation store at %s is unreadable: %s", coco_path, exc)
+        return 2
+    if _labelled == 0:
+        _LOG.error(
+            "cannot fit thresholds: the evaluation set at %s has 0 labelled frames. "
+            "Label frames at /label, then run `python scripts/build_splits.py`, then "
+            "re-run this script. Until then policy.thresholds_fitted stays false and "
+            "the thresholds are unfitted defaults.",
+            coco_path,
+        )
+        return 2
+
     try:
         store, splits = load_store_and_splits(config)
         spec = model_spec(args.model, config, models_dir=_REPO_ROOT / "models")
@@ -184,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     (results_dir / "fit_thresholds_val.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     (results_dir / "fit_thresholds_val.md").write_text(_markdown(payload), encoding="utf-8")
 
-    print("\n# paste into policy.per_class_thresholds (justified by results/fit_thresholds_val.md)")
+    print("\n# paste into policy: (justified by results/fit_thresholds_val.md)")
+    print("  thresholds_fitted: true   # set this - the UI stops calling the thresholds unfitted")
     print("  per_class_thresholds:")
     for cls, thr in fitted.items():
         print(f"    {cls}: {thr}")

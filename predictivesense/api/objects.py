@@ -50,6 +50,13 @@ _LOG = get_logger(__name__)
 router = APIRouter()
 
 
+def _parse_float(value: str, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 # -- request models ------------------------------------------------
 
 
@@ -225,6 +232,9 @@ async def add_sample(
     device_label: str = Form(""),
     original_filename: str = Form(""),
     consent_ack: str = Form("false"),
+    capture_path: str = Form(""),
+    requested_resolution: str = Form(""),
+    encoded_quality: str = Form(""),
 ) -> dict[str, Any]:
     cfg = request.app.state.config.objects
     store = _sample_store(request, object_id)
@@ -262,13 +272,22 @@ async def add_sample(
         duplicate_hamming_max=cfg.duplicate_hamming_max,
     )
 
-    # Re-encode to a normalised JPEG so the stored image is deterministic and
-    # its size is bounded regardless of the upload format.
+    # Store the FULL-resolution original. A JPEG upload is kept verbatim so a
+    # Studio capture is not re-compressed (generation loss); any other format is
+    # normalised to JPEG q92 once. The thumbnail is always a separate, smaller
+    # file and never stands in for the original (BLOCK 3.23).
+    is_jpeg = data[:3] == b"\xff\xd8\xff"
     try:
-        norm_jpeg = encode_jpeg(img, quality=92)
+        if is_jpeg:
+            norm_jpeg = data
+            stored_quality = _parse_float(encoded_quality, 0.92)
+        else:
+            norm_jpeg = encode_jpeg(img, quality=92)
+            stored_quality = 0.92
         thumb = thumbnail_jpeg(img, cfg.thumbnail_px)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"could not encode image: {exc}") from exc
+    achieved_resolution = f"{width}x{height}"
 
     src = "upload" if source not in ("camera", "upload") else source
     try:
@@ -286,6 +305,10 @@ async def add_sample(
             original_filename=(original_filename or image.filename) if src == "upload" else None,
             consent_ack=str(consent_ack).strip().lower() in {"true", "1", "yes", "on"},
             thumb_bytes=thumb,
+            capture_path=(capture_path or ("upload" if src == "upload" else None)) or None,
+            requested_resolution=requested_resolution or None,
+            achieved_resolution=achieved_resolution,
+            encoded_quality=stored_quality,
         )
     except (ObjectStoreError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

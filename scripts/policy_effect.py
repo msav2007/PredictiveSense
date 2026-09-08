@@ -150,10 +150,13 @@ def _markdown(p: dict) -> str:
         "|---|---|---|",
     ]
     tot = max(1, int(p["raw_detections"]))
-    for k in ("accepted", "unknown_low_confidence", "unknown_margin",
-              "rejected_out_of_domain", "rejected_size"):
+    for k in ("accepted", "accepted_secondary", "unknown_low_confidence",
+              "unknown_margin", "suppressed_implausible", "rejected_size"):
         L.append(f"| {k} | {int(c[k])} | {int(c[k]) / tot:.3f} |")
-    L.append(f"| **reconciles (accepted+unknown+rejected == raw)** | {p['reconciles']} | — |")
+    L.append(
+        "| **reconciles (accepted+accepted_secondary+unknown+suppressed+rejected == raw)** "
+        f"| {p['reconciles']} | — |"
+    )
     L += ["", "## Most frequent raw → decided relabels", "",
           "| change | count |", "|---|---|"]
     for change, n in p["top_relabels"]:

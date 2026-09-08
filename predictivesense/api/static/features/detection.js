@@ -11,7 +11,12 @@ import { runtime } from "/static/features/runtime.js";
 import { el, settingRow } from "/static/ui/controls.js";
 import { fmtNum } from "/static/ui/format.js";
 import { isLayerEnabled, setLayerEnabled, onLayerChange } from "/static/features/analysis-prefs.js";
-import { isPolicyView, setPolicyView, activeThresholds } from "/static/features/policy.js";
+import {
+  isPolicyView,
+  setPolicyView,
+  activeThresholds,
+  thresholdsFitted,
+} from "/static/features/policy.js";
 
 export const id = "detection";
 export const title = "Detection";
@@ -53,15 +58,40 @@ export function render(body) {
     ),
   );
 
-  // -- Phase 2.5 recognition policy controls -------------------------
+  // -- recognition policy controls (Phase 2.5, redesigned Phase 5) ---------
   const pol = runtime.config?.policy || {};
+  const vocab = pol.vocabulary || {};
   body.append(el("p", { class: "subhead", text: "Recognition policy" }));
+
+  if (!thresholdsFitted()) {
+    body.append(
+      el("p", { class: "note warn-note", id: "unfitted-threshold-notice" }, [
+        el("strong", { text: "Thresholds are unfitted defaults." }),
+        el("span", {
+          text:
+            " default_threshold and margin_min below are placeholders, not values " +
+            "fitted on validation data. Run scripts/fit_thresholds.py once the " +
+            "evaluation set at data/eval is labelled, then set policy.thresholds_fitted: true.",
+        }),
+      ]),
+    );
+  }
+
   body.append(
     policyToggle("Policy", "policy"),
-    policyToggle("Domain restriction", "domain"),
+    policyToggle("Suppress implausible tier", "domain"),
     policyToggle("Top-2 margin rule", "margin"),
     roRow("Backend policy", pol.enabled === false ? "off (config)" : "on (config)"),
-    roRow("Domain classes", (pol.domain_classes || []).length + " classes"),
+    roRow(
+      "Vocabulary tiers",
+      `primary ${(vocab.primary || []).length} · secondary ${
+        (vocab.secondary || []).length
+      } · implausible ${(vocab.implausible || []).length}`,
+    ),
+    roRow(
+      "Thresholds",
+      thresholdsFitted() ? "fitted on val" : "UNFITTED — placeholder defaults",
+    ),
     roRow("Default threshold", pol.default_threshold != null ? String(pol.default_threshold) : "—"),
     roRow("Margin min", pol.margin_min != null ? String(pol.margin_min) : "—"),
     roRow("Min box area frac", pol.min_box_area_frac != null ? String(pol.min_box_area_frac) : "—"),
@@ -75,7 +105,7 @@ export function render(body) {
       "Per-class thresholds",
       perClass.length
         ? perClass.map(([k, v]) => `${k}:${v}`).join(", ")
-        : "none fitted yet (uses default)",
+        : "none fitted — every class uses default_threshold",
     ),
     el("p", { class: "summary-line", id: "am-live-detection", text: "—" }),
   );

@@ -44,8 +44,8 @@ files losslessly.
 ## Module map
 
 - `predictivesense/core/enums.py` - `Mode`, `SourceKind` (`SYNTHETIC`/`DEVICE`/`FILE`/`BROWSER` constructible; `WEBRTC` never), `RiskLevel`, `TrackStatus`, and the "constructible source kind" guard.
-- `predictivesense/core/types.py` - all frozen contracts (Block 8). Imports only stdlib, numpy, Pydantic, and `core.enums`. Phase 1 added `SourceInfo`, `ClipManifest`, `IngestHeader`.
-- `predictivesense/config/settings.py` - typed settings, YAML profile loading, strict validation, env overrides (`PS_` prefix, `__` nesting). Phase 1 sections: `capture` (incl. tuning knobs `fourcc`/`buffer_size`/`warmup_frames` and Phase 1.5's `max_ws_buffered_bytes` worker-backpressure ceiling, default 1 MB - all default to the measured-optimal value), `recorder`, `video`. Phase 2 section: `perception` (`detection_enabled`/`pose_enabled`/`pose_every_n`/`intra_op_threads` (6 - measured knee; auto over-subscribes)/`provider` (cpu), nested `detector` + `pose` sub-sections per Block 6). Phase 2.5: `perception.pose_requires_person` + `perception.detector.decode` (`yolo`|`yolox`); new sections `policy` (`enabled`/`domain_restriction`/`margin_rule`/`size_rule`/`per_class_threshold_rule` switches, `domain_classes` (validated vs COCO-80), `per_class_thresholds`, `default_threshold`, `margin_min`, `min_box_area_frac`, `emit_unknown`, `aspect_ratio_bounds`), `dataset` (`root`/`coco_path`/`splits_path`/`frames_dirname`/`min_unseeded_fraction`), `eval` (`iou_threshold`/`results_dir`/`val_fraction`/`test_fraction`/`split_seed`). Phase 4 sections: `objects` (`root`/`max_image_mb`/`thumbnail_px`/`blur_var_min`/`min_box_area_frac`/`duplicate_hamming_max` + nested `coverage_targets`), `studio` (`stop_monitoring_on_enter`), `ui.panel` (`default_width_px`/`min_width_px`/`max_width_px`/`max_width_frac`) - all with measured/prompt defaults, served read-only in `/api/config`.
+- `predictivesense/core/types.py` - all frozen contracts (Block 8). Imports only stdlib, numpy, Pydantic, and `core.enums`. Phase 1 added `SourceInfo`, `ClipManifest`, `IngestHeader`. Phase 5 added `Detection.tier` (additive).
+- `predictivesense/config/settings.py` - typed settings, YAML profile loading, strict validation, env overrides (`PS_` prefix, `__` nesting). Phase 1 sections: `capture` (incl. tuning knobs `fourcc`/`buffer_size`/`warmup_frames` and Phase 1.5's `max_ws_buffered_bytes` worker-backpressure ceiling, default 1 MB - all default to the measured-optimal value), `recorder`, `video`. Phase 2 section: `perception` (`detection_enabled`/`pose_enabled`/`pose_every_n`/`intra_op_threads` (6 - measured knee; auto over-subscribes)/`provider` (cpu), nested `detector` + `pose` sub-sections per Block 6). Phase 2.5: `perception.pose_requires_person` + `perception.detector.decode` (`yolo`|`yolox`); new sections `policy` (`enabled`/`domain_restriction`/`margin_rule`/`size_rule`/`per_class_threshold_rule` switches; **Phase 5** replaced `domain_classes` with nested `vocabulary` (`primary`/`secondary`/`implausible` - a total, disjoint, load-validated partition of COCO-80; `domain_classes` kept as a `@computed_field` = `primary`) and added `thresholds_fitted` (false until `fit_thresholds.py` runs) + `show_suppressed_in_diagnostics`; `per_class_thresholds`, `default_threshold`, `margin_min`, `min_box_area_frac`, `emit_unknown`, `aspect_ratio_bounds`), `dataset` (`root`/`coco_path`/`splits_path`/`frames_dirname`/`min_unseeded_fraction`), `eval` (`iou_threshold`/`results_dir`/`val_fraction`/`test_fraction`/`split_seed`). Phase 4 sections: `objects` (`root`/`max_image_mb`/`thumbnail_px`/`blur_var_min`/`min_box_area_frac`/`duplicate_hamming_max` + nested `coverage_targets`), `studio` (`stop_monitoring_on_enter`), `ui.panel` (`default_width_px`/`min_width_px`/`max_width_px`/`max_width_frac`) - all with measured/prompt defaults, served read-only in `/api/config`.
 - `predictivesense/camera/_opencv.py` - `quiet_opencv_logging()` (idempotent `cv2.setLogLevel(ERROR)` - kills the VIDEOIO index-probe spam), `fourcc_to_str()`, (Phase 2.5) `read_image_bgr()`, and (Phase 4) `decode_image_bgr()` / `encode_jpeg()` / `thumbnail_jpeg()` - the Object Learning Studio upload/capture codec path, keeping `cv2` out of `predictivesense/api/`.
 - `predictivesense/camera/source.py` - `FrameSource` interface + `create_frame_source` (builds only `SYNTHETIC`; other kinds raise `NotImplementedError` - built by `pipeline.build_camera_source` / `RecordedDriver`).
 - `predictivesense/camera/synthetic.py` - `SyntheticSource`: deterministic, strictly increasing `frame_id` / `capture_ts`, paced to a target rate.
@@ -57,7 +57,7 @@ files losslessly.
 - `predictivesense/camera/file_source.py` - `FileSource`: sequential decode, pts-based `capture_ts`, `asfast`/`realtime` replay, deterministic `restart()`; `video_duration_s()` helper.
 - `predictivesense/pipeline/loop.py` - `AnalysisLoop` (+ `build_camera_source`, `request_consumer_stall`): producer thread + consumer + lifecycle + error surfacing + Phase 1 metric keys. Phase 2: takes an optional `PerceptionEngine`; the consumer runs `_run_perception(frame)` per iteration, populates `StateSnapshot.detections`/`.poses` and adds `detector_ms*`/`pose_ms*`/`perception_ms`/`detections_per_frame`/`poses_per_frame`/`*_warmup_ms`/`perception_frame_errors` metric keys. A perception exception is counted and dropped, never fatal. Phase 2.5: also takes an optional `RecognitionPolicy` (built by `build_loop` from `config.policy`), applied after `_run_perception`; adds `policy_accepted`/`policy_unknown_*`/`policy_rejected_*`/`policy_errors`/`policy_ms`/`policy_ms_p95` keys; `policy_raw_to_decided` property backs the Diagnostics readout. Phase 4: `pause()` / `resume()` / `paused` (a dedicated `threading.Event`, distinct from the debug stall) - while paused the consumer runs **no** iteration (no perception, no snapshot) and the producer reads no frames; used by the Object Learning Studio lifecycle.
 - `predictivesense/pipeline/recorded.py` - `RecordedDriver`: Mode B, no mailbox, every frame, byte-deterministic `results/recorded_<run_id>.jsonl` + manifest. Phase 2: `run(..., perception=engine)` writes real `detections`/`poses` at fixed precision; determinism now includes the model (CPU ORT is deterministic). No `perception=` -> exactly the Phase 1 empty shape. Phase 2.5: `run(..., policy=RecognitionPolicy(...))` annotates each detection (`raw_class_name`/`policy_state`/`runner_up` in the JSONL); without `policy=` the JSONL shape is byte-identical to Phase 2.
-- `predictivesense/perception/` - Phase 2 per-frame perception (detection + pose only; no tracking/identity/temporal/risk/voice). `runtime.py` (ORT session, explicit provider selection + verification, warm-up, `intra_op_threads`; Phase 2.5: `inter_op=1` + `ORT_SEQUENTIAL` set explicitly), `preprocess.py` (`letterbox` + coord mapping, pure NumPy; Phase 2.5: `to_rgb`/`scale`/`center` params for the YOLOX path, defaults = YOLO), `postprocess.py` (`xywh_to_xyxy`, `nms`, `class_aware_nms`; Phase 2.5: `yolox_decode` grid decode), `classes.py` (COCO-80, 12 required classes, alias map, 17 keypoints, skeleton, `class_color`), `detector.py` (`ObjectDetector.infer -> list[Detection]`, per-class thresholds, class list from ONNX `names` metadata; Phase 2.5: also sets `raw_class_name`/`runner_up` additively, `decode: yolo|yolox` variant - YOLO path unchanged), `pose.py` (`PoseEstimator.infer -> list[Pose]`), `engine.py` (`PerceptionEngine` + `build_perception(config, strict=)`; Phase 2.5: `pose_requires_person` gating), `policy.py` (**Phase 2.5** `RecognitionPolicy.apply(detections, frame_w, frame_h) -> PolicyOutcome`: domain / per-class-threshold / top-2-margin / size rules, each switchable and counted, `accepted+unknown+rejected==input`, never raises into the loop), `types.py` (`PerceptionResult` internal aggregate). `onnxruntime` + `cv2` are imported only here and under `camera/`.
+- `predictivesense/perception/` - Phase 2 per-frame perception (detection + pose only; no tracking/identity/temporal/risk/voice). `runtime.py` (ORT session, explicit provider selection + verification, warm-up, `intra_op_threads`; Phase 2.5: `inter_op=1` + `ORT_SEQUENTIAL` set explicitly), `preprocess.py` (`letterbox` + coord mapping, pure NumPy; Phase 2.5: `to_rgb`/`scale`/`center` params for the YOLOX path, defaults = YOLO), `postprocess.py` (`xywh_to_xyxy`, `nms`, `class_aware_nms`; Phase 2.5: `yolox_decode` grid decode), `classes.py` (COCO-80, 12 required classes, alias map, 17 keypoints, skeleton, `class_color`), `detector.py` (`ObjectDetector.infer -> list[Detection]`, per-class thresholds, class list from ONNX `names` metadata; Phase 2.5: also sets `raw_class_name`/`runner_up` additively, `decode: yolo|yolox` variant - YOLO path unchanged), `pose.py` (`PoseEstimator.infer -> list[Pose]`), `engine.py` (`PerceptionEngine` + `build_perception(config, strict=)`; Phase 2.5: `pose_requires_person` gating), `vocabulary.py` (**Phase 5** three-tier class partition `PRIMARY_TIER`/`SECONDARY_TIER`/`IMPLAUSIBLE_TIER`, `validate_partition` (total+disjoint over COCO-80, fails loudly), `VocabularyTiers.tier_for` -> `primary|secondary|implausible|unlisted`; stdlib-only), `policy.py` (`RecognitionPolicy.apply(detections, frame_w, frame_h) -> PolicyOutcome`: size / implausible-tier suppression / per-class-threshold / top-2-margin / secondary rules, each switchable and counted; **Phase 5** six reconciling `policy_state` values, `suppressed_implausible` distinct from `unknown`, sets `Detection.tier`; never raises into the loop), `types.py` (`PerceptionResult` internal aggregate). `onnxruntime` + `cv2` are imported only here and under `camera/`.
 - `predictivesense/dataset/` - **Phase 2.5** labelled eval set. `coco_store.py` (`CocoStore` read/write COCO detection JSON, id allocation, schema validation, `.bak` on overwrite, `seeded`/`labelled`/`ps_provenance` per image; `domain_categories`), `splits.py` (`build_splits` session-disjoint, `assert_no_leakage`, `load_splits` refuses a stale content hash), `quality.py` (`FrameProvenance`, `ProgressSummary`, unseeded-subset helpers). Stdlib + numpy only.
 - `predictivesense/eval/` - **Phase 2.5** detection eval harness. `matching.py` (`iou_xyxy`, `greedy_match` - greedy score-ordered geometric assignment), `metrics.py` (`evaluate -> EvalMetrics`: per-class P/R/F1/support, confusion incl `background`+`unknown`, **false-class rate** headline, AP@0.5/mAP@0.5, top confusions; sample counts beside every metric; empty-safe), `report.py` (`run_metadata` + `write_reports` json+md). No onnxruntime/cv2 here.
 - `predictivesense/objects/` - **Phase 4** Object Learning Studio store (data collection only; trains nothing). `vocab.py` (fixed `view/distance/lighting/background/occlusion/held/frame_position` vocabularies, `ROLES`/`KINDS`/`STATUSES`, `CONFUSABLE_SEEDS` from the developer's observed failure modes, `validate_conditions`). `registry.py` (`ObjectProfile` + `ObjectRegistry` over `data/objects/objects.json`: slug ids with `-2`/`-3` collision suffixes, `create`/`get`/`list`/`update`/`set_counts`/`soft_delete`, atomic `os.replace` writes, `_deleted/` move, corrupt file -> `ObjectStoreError`). `samples.py` (`ObjectSample` + `SampleStore` over `data/objects/<id>/manifest.json`: one required `[x,y,w,h]` box validated vs image bounds, condition dict filled+validated, provenance `captured_utc`/`git_commit`/`source`/`device_label`/`original_filename`/`consent_ack`, atomic write, soft delete moves image files to `_deleted/`). `quality.py` (**numpy only** - `laplacian_variance` via a 3x3 valid correlation, `dhash` via area-average block-reduce, `hamming`, `nearest_duplicate`, `compute_sample_quality` -> blur/area-frac/phash/flags, `coverage_summary` -> counts + plain guidance strings, no composite score). Stdlib + numpy only.
@@ -90,7 +90,8 @@ files losslessly.
 - `scripts/fetch_models.py` - **manual** build-time model fetch: downloads + SHA-256-verifies `yolo11n.onnx` / `yolo11n-pose.onnx` / (Phase 2.5) `yolox_tiny.onnx` per `models/manifest.json`, writes the AGPL licence text. Not imported by the package; excluded from the outbound-network guard by path.
 - `scripts/build_eval_frames.py` - **Phase 2.5** sample frames from `data/raw/` clips (`--every-n`, `--max-per-clip`) -> `data/eval/frames/*.jpg` + provenance + create the COCO store.
 - `scripts/build_splits.py` - **Phase 2.5** session-disjoint `val`/`test` split -> `data/eval/splits.json` (content hash). Exit 2 when nothing is labelled.
-- `scripts/fit_thresholds.py` - **Phase 2.5** per-class thresholds + `margin_min` on `val` only -> `results/fit_thresholds_val.{json,md}`. Refuses `test`.
+- `scripts/fit_thresholds.py` - **Phase 2.5** per-class thresholds + `margin_min` on `val` only -> `results/fit_thresholds_val.{json,md}`. Refuses `test`. **Phase 5**: refuses an unlabelled / empty split (checks the COCO store's labelled count first) before touching the detector or writing anything; prints `thresholds_fitted: true` in its paste-in block.
+- `scripts/policy_audit.py` - **Phase 5** the policy-change evidence script. Detector + policy over real footage (`--source`, `--frames`) -> per-state + per-raw-class counts, per-state confidence distribution, top implausible-tier suppressions, `raw -> decided` relabels, + a synthetic-noise control (0 detections expected) -> `results/policy_audit_<label>.{json,md}`. **Frequencies, not accuracy.**
 - `scripts/eval_detection.py` - **Phase 2.5** `--split val|test --model yolo11n|yolox_tiny --policy on|off`: greedy-IoU harness -> `results/eval_<model>_<policy>_<split>.{json,md}`. Refuses empty/partial split; logs every `test` opening to `results/test_set_openings.md` and refuses a 2nd without `--allow-reopen`.
 - `scripts/policy_effect.py` - **Phase 2.5** mechanical policy effect on unlabelled frames (counts, not accuracy) -> `results/policy_effect_unlabelled_<model>.{json,md}`.
 - `scripts/benchmark_latency.py` - **Phase 2.5** pose-gating / intra-op thread sweep / policy cost (<1ms p95) over `data/raw/` -> `results/latency_2_5.{json,md}`.
@@ -110,10 +111,17 @@ Names only; definitions in `predictivesense/core/types.py`:
 Interfaces: `FrameSource` (in `camera/source.py`), the mailbox `put` / `get` /
 `stats` (in `camera/mailbox.py`).
 Phase 2.5 added three **additive** fields to `Detection` (no rename/reshape):
-`raw_class_name: str`, `policy_state: str`, `runner_up: tuple[str, float] | None`
-(see `docs/decisions.md`). Phase 4 added **no** `core/types.py` contract - the
-Object Learning Studio's `ObjectProfile` / `ObjectSample` are their own schemas
-under `predictivesense/objects/` (a separate concern, like `dataset/`).
+`raw_class_name: str`, `policy_state: str`, `runner_up: tuple[str, float] | None`.
+Phase 5 added a fourth: `tier: str = "primary"` (`primary|secondary|implausible|
+unlisted`) and widened `policy_state` to six values
+(`accepted`/`accepted_secondary`/`unknown_low_confidence`/`unknown_margin`/
+`suppressed_implausible`/`rejected_size`; `rejected_out_of_domain` was renamed
+`suppressed_implausible`). See `docs/decisions.md`. Phase 4 added **no**
+`core/types.py` contract - the Object Learning Studio's `ObjectProfile` /
+`ObjectSample` are their own schemas under `predictivesense/objects/` (a separate
+concern, like `dataset/`); Phase 5 added additive capture-quality provenance
+fields to `ObjectSample` (`capture_path`, `requested_resolution`,
+`achieved_resolution`, `encoded_quality`, `original_bytes`).
 
 ## Commands
 
@@ -224,32 +232,72 @@ $f = & .\.venv\Scripts\python.exe -m pip freeze --exclude-editable
 
 ## Phase discipline
 
-Current phase: **Phase 4 (Object Learning Studio & Operations Panel) COMPLETE** -
-see `PredictiveSense-P4-Prompt.md`. Adds `/studio` (environment-specific object
-*data collection* - images with one box each, condition tags, quality
-heuristics, hard negatives), the `predictivesense/objects/` store, a model
-*version registry* (read/validate/resolve only, `models/registry.json`), and a
-resizable/keyboard-accessible operations panel. **No model trained or
-fine-tuned; recognition is byte-for-byte unchanged** (no perception or policy
-code touched). Still **no** tracker, track IDs, association, `Relation`, temporal
-state, risk model, alert policy, TTS, instance-recognition inference, or
-environment scan - none started, none placeheld. `StateSnapshot.tracks` is still
-always `[]`. Object images are training data, never merged with `data/eval`.
-Never report a confidence value as accuracy, a detection frequency as P/R, a
-stored image as a trained model, or a coverage/quality heuristic as a validated
-metric. Never fit a threshold on `test` or open `test` more than once. Never
-claim a performance number not produced by a command run on this machine, or a
-physical check not performed. **Do not start the next phase.**
+Current phase: **Phase 5 (Recognition Trust & Studio Repair) COMPLETE** - see
+`PredictiveSense-P5-Prompt.md`. Fixes what was wrong: (1) the recognition policy
+whitelist that rejected valid baseline classes -> replaced by a three-tier class
+vocabulary (`primary`/`secondary`/`implausible`), a total disjoint partition of
+COCO-80 validated at load; `primary` + `secondary` both shown, only
+`implausible` suppressed - the general model works out of the box with no
+enrolment; (2) "Unknown (was Bed)" -> `suppressed_implausible` is now distinct
+from `unknown` in logic, contract and display; the main overlay label is exactly
+`Unknown`, full detail relocated to Diagnostics; (3) unfitted thresholds are
+labelled unfitted in the UI (`policy.thresholds_fitted`) and `fit_thresholds.py`
+refuses an unlabelled split. Also: an explicit Studio state machine
+(`browsing|object_selected|capturing|reviewing`) fixing Back-to-camera /
+re-select / Save-&-Return, and Studio capture reusing the monitoring camera path
+(full-resolution original + separate thumbnail, requested vs achieved recorded).
+**No model trained or fine-tuned; no model swap / quantisation / threading
+redesign.** Recognition of watch / spectacles / charger / headphones / shaker is
+unchanged (outside the model's vocabulary). Still **no** tracker, track IDs,
+association, `Relation`, temporal state, risk model, alert policy, TTS,
+instance-recognition inference, environment scan, or Scene Snapshot Studio - none
+started, none placeheld. `StateSnapshot.tracks` is still always `[]`. Object
+images are training data, never merged with `data/eval`. Never report a
+confidence value as accuracy, a detection frequency as P/R, a stored image as a
+trained model, a coverage/quality heuristic as a validated metric, or a tier
+assignment as a measured result. Never fit a threshold on `test` or open `test`
+more than once. Never claim a performance number not produced by a command run on
+this machine, or a physical check not performed. **Do not start Phase 6.**
 
 ## Current phase status
 
-Phase 4 complete. `pytest -q`: **292 passed, 2 skipped** (1 hardware
+Phase 5 complete. `pytest -q`: **321 passed, 2 skipped** (1 hardware
 `--run-hardware`; 1 `dataset` - skips cleanly until the eval set is labelled).
-`pytest -q -m models` = **12 passed** (unchanged - no perception code touched);
-`pytest -q -m dataset` = 1 skipped cleanly. Baseline at end of Phase 2.5 was 250
-passed / 2 skipped; +42 tests, 0 regressions. See `docs/phase-reports/phase4.md`
-(three-part format), `docs/architecture.md` "Phase 4", `docs/decisions.md`
-"Phase 4".
+`pytest -q -m models` = **12 passed** (unchanged - Phase 5 touched no
+detector/pose inference code); `pytest -q -m dataset` = 1 skipped cleanly.
+Baseline at end of Phase 4 was 292 passed / 2 skipped; **+29 tests, 0
+regressions**. See `docs/phase-reports/phase5.md` (three-part format),
+`docs/architecture.md` "Phase 5", `docs/decisions.md` "Phase 5".
+
+Phase 5 summary: `predictivesense/perception/vocabulary.py` (three-tier partition
++ `validate_partition` + `VocabularyTiers.tier_for`, stdlib-only);
+`config.policy` gains `vocabulary` (nested `primary`/`secondary`/`implausible`,
+partition-validated), `thresholds_fitted`, `show_suppressed_in_diagnostics`;
+`domain_classes` is now a `@computed_field` = the `primary` tier (back-compat).
+`perception/policy.py` reworked: six `policy_state` values reconciling exactly
+(`rejected_out_of_domain` -> `suppressed_implausible`, new `accepted_secondary`);
+`Detection.tier` additive. `core/types.py`, `pipeline/recorded.py` carry the new
+fields; `pipeline/loop.py` metric keys renamed via `PolicyCounts.as_metrics`.
+UI: `features/overlay.js` (label exactly `Unknown`, secondary de-emphasis,
+suppressed hidden + Diagnostics reveal, click-to-select), `features/policy.js`
+(six kinds, `thresholdsFitted`, `ruleLabel`, `thresholdFor`),
+`features/detection.js` (unfitted-threshold `warn-note`), `groups/diagnostics.js`
+(recognition-detail table + selected-detection inspector + renamed policy
+counters). `scripts/policy_audit.py` (new), `scripts/fit_thresholds.py` (refuses
+unlabelled), `scripts/benchmark_latency.py` (end-to-end loopback).
+`static/studio/studio-state.js` (new state machine); `studio.js` rewritten as a
+pure render of it; `objects/samples.py` + `api/objects.py` store a
+full-resolution original (JPEG uploads verbatim) + separate thumbnail with
+`capture_path` / `requested_resolution` / `achieved_resolution` /
+`encoded_quality` / `original_bytes` provenance. **Measured (this machine):**
+policy audit over 400 `data/raw` frames - 481 raw detections -> 452 accepted /
+23 accepted_secondary / 1 unknown / 5 suppressed_implausible (`surfboard`) / 0
+rejected_size, reconciles; with the old whitelist `couch` (3) + `umbrella` (20)
+would have been "Unknown (was ...)". Synthetic-noise control: 0 detections.
+Policy cost 0.06 ms p50 / 0.08 ms p95 (< 1 ms). Clean per-frame CPU inference
+(first in-process run): detector 68.9/81.5, pose 55.1/63.2, combined
+124.7/139.6 ms p50/p95 - unchanged from Phase 2.5 (no perception code touched);
+no optimisation was justified by the measurements and none was applied.
 
 Phase 4 summary: `predictivesense/objects/` (`vocab` / `registry` / `samples` /
 `quality` - stdlib + numpy only; `ObjectProfile` + `ObjectSample` CRUD with slug

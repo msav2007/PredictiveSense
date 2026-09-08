@@ -1,33 +1,56 @@
-/* Object Learning Studio (Phase 4).
+/* Object Learning Studio (Phase 4, lifecycle + capture-quality repair Phase 5).
  *
  * A standalone screen (not the dashboard shell). On entry it calls
  * POST /api/studio/enter, which pauses the monitoring pipeline; on exit it calls
  * POST /api/studio/leave, which restores it. The camera preview here is
  * getUserMedia -> <video>.srcObject only, with no analysis worker attached.
  *
- * Every saved sample carries exactly one bounding box (in source-image pixels),
- * condition tags from the fixed vocabularies, and a role. Storing images is not
- * training.
+ * Phase 5:
+ *  - an explicit state machine (studio-state.js) owns browsing / object_selected
+ *    / capturing / reviewing. The DOM is a pure function of it; no reloads.
+ *  - camera acquisition reuses the SAME constraints as the main monitoring
+ *    preview and asks the device for its best practical resolution
+ *    (getCapabilities -> applyConstraints -> getSettings, requested vs achieved
+ *    recorded).
+ *  - capture is taken from an ImageBitmap of the live track at full achieved
+ *    resolution and stored as the full-resolution original (JPEG q>=0.92); the
+ *    thumbnail is separate.
+ *  - Save & Return warns before discarding any pending (staged / unsaved) sample.
+ *
+ * Every saved sample carries exactly one bounding box, condition tags, a role,
+ * and capture provenance. Storing images is not training.
  */
 "use strict";
 
 import { el } from "/static/ui/controls.js";
+import { createStudioState } from "/static/studio/studio-state.js";
 
 const $ = (id) => document.getElementById(id);
 const COND_KEY = "ps.studio.conditions";
 const CONSENT_KEY = "ps.studio.consent";
 
+// Same request as static/features/camera-capture.js (the main monitoring path).
+const PREVIEW_REQUEST = { width: 1280, height: 720, frameRate: 30 };
+// Ceiling for the "best practical resolution" probe (BLOCK 3.22).
+const MAX_CAPTURE_DIM = 1920;
+
+const sm = createStudioState();
+
 const state = {
   token: null,
   vocab: null,
+  // mirrors of sm.context, written only by render()
   objectId: null,
-  objects: [],
-  stream: null,
-  stageKind: "camera", // "camera" | "upload" | "inspect"
-  boxImg: { x: 0, y: 0, w: 0, h: 0 }, // source-image pixel coords
-  uploadQueue: [], // File[]
-  uploadUrl: null,
+  stageKind: "camera",
   editingSampleId: null,
+  stream: null,
+  track: null,
+  requestedResolution: "",
+  achievedResolution: "",
+  capabilitiesAvailable: true,
+  boxImg: { x: 0, y: 0, w: 0, h: 0 },
+  uploadQueue: [],
+  uploadUrl: null,
   left: false,
 };
 
@@ -58,11 +81,25 @@ async function leave() {
   }
 }
 
+async function saveAndReturn() {
+  // BLOCK 3.19: never silently discard a pending capture.
+  if (sm.hasPending()) {
+    const n = sm.context.pendingUploads;
+    const what = n > 0 ? `${n} staged image${n === 1 ? "" : "s"}` : "unsaved edits to a sample";
+    if (!window.confirm(`You have ${what} that have not been saved. Leave and discard them?`)) {
+      return;
+    }
+    sm.setPending({ uploads: 0, dirtyInspect: false });
+  }
+  sm.dispatch("save_and_return");
+  await leave();
+  window.location.href = "/";
+}
+
 function wireExit() {
   $("btn-return").addEventListener("click", async (ev) => {
     ev.preventDefault();
-    await leave();
-    window.location.href = "/";
+    await saveAndReturn();
   });
   window.addEventListener("pagehide", () => {
     if (state.left) return;
@@ -73,6 +110,47 @@ function wireExit() {
       /* ignore */
     }
   });
+  window.addEventListener("beforeunload", (ev) => {
+    if (!state.left && sm.hasPending()) {
+      ev.preventDefault();
+      ev.returnValue = "";
+    }
+  });
+}
+
+// ---------- render: DOM as a pure function of the state machine ----------
+
+function render(snap) {
+  const { state: st, context: ctx } = snap;
+  state.objectId = ctx.objectId;
+  state.editingSampleId = ctx.editingSampleId;
+  state.stageKind = ctx.stage;
+
+  $("empty-state").hidden = st !== "browsing";
+  $("capture-pane").hidden = st === "browsing";
+
+  $("preview").hidden = ctx.stage !== "camera";
+  $("upload-preview").hidden = ctx.stage === "camera";
+  $("btn-capture").textContent =
+    ctx.stage === "camera" ? "Capture (c)" : ctx.stage === "upload" ? "Save upload (c)" : "Save changes (c)";
+  $("btn-upload-label").hidden = ctx.stage === "inspect";
+
+  const inspectBar = $("inspect-actions");
+  if (inspectBar) inspectBar.hidden = st !== "reviewing";
+
+  const pendingNote = $("pending-note");
+  if (pendingNote) {
+    pendingNote.hidden = !sm.hasPending();
+    pendingNote.textContent = sm.hasPending()
+      ? "Unsaved capture — save it or it will be discarded on leaving."
+      : "";
+  }
+
+  // keep the active object highlighted in the sidebar without a network call
+  for (const li of document.querySelectorAll(".object-item")) {
+    li.classList.toggle("active", li.dataset.objectId === ctx.objectId);
+  }
+  layoutBox();
 }
 
 // ---------- objects ----------
@@ -86,6 +164,7 @@ async function loadObjects() {
     ...state.objects.map((o) => {
       const li = el("li", {
         class: "object-item" + (o.object_id === state.objectId ? " active" : ""),
+        dataset: { objectId: o.object_id },
         onClick: () => selectObject(o.object_id),
       });
       li.append(
@@ -140,14 +219,14 @@ function wireNewObject() {
 }
 
 async function selectObject(objectId) {
-  state.objectId = objectId;
-  state.editingSampleId = null;
-  clearUploadQueue();
-  setStageKind("camera");
-  $("empty-state").hidden = true;
-  $("capture-pane").hidden = false;
+  // BLOCK 3.17: selecting an object restores the FULL editor - samples,
+  // metadata, camera, box editor, coverage - with no reload and no stale
+  // inspect controls.
+  clearUploadQueue({ silent: true });
+  sm.dispatch("select", { objectId });
   await loadObjects();
   await refreshObject();
+  await ensureCamera();
   centreBox();
 }
 
@@ -199,15 +278,16 @@ function wireObjectMeta() {
     if (!r.ok) note(`update failed: ${await r.text()}`);
     await refreshObject();
     await loadObjects();
+    render(sm.snapshot());
   });
   $("btn-delete-object").addEventListener("click", async () => {
     if (!window.confirm("Move this object's folder to data/objects/_deleted/? It is not destroyed.")) return;
     const r = await fetch(`/api/objects/${state.objectId}`, { method: "DELETE" });
     const body = await r.json().catch(() => ({}));
     note(body.moved_to ? `soft-deleted → ${body.moved_to}` : "soft-deleted");
+    sm.setPending({ uploads: 0, dirtyInspect: false });
+    sm.dispatch("save_and_return"); // back to browsing (object gone)
     state.objectId = null;
-    $("capture-pane").hidden = true;
-    $("empty-state").hidden = false;
     await loadObjects();
   });
 }
@@ -258,6 +338,7 @@ function persistConditionDefaults() {
   } catch {
     /* ignore */
   }
+  if (state.stageKind === "inspect") sm.setPending({ dirtyInspect: true });
 }
 
 function setConditions(values) {
@@ -272,7 +353,7 @@ function currentRole() {
   return r ? r.value : "positive";
 }
 
-// ---------- camera ----------
+// ---------- camera (reuses the main monitoring preview constraints) ----------
 
 async function startCamera() {
   try {
@@ -288,6 +369,13 @@ async function startCamera() {
   $("camera-select").addEventListener("change", () => openCamera($("camera-select").value));
 }
 
+/** Re-open the camera if it is not currently live (e.g. after returning from a
+ *  sample inspect on a device that dropped). No-op when a stream is healthy. */
+async function ensureCamera() {
+  if (state.track && state.track.readyState === "live") return;
+  await openCamera($("camera-select")?.value || "");
+}
+
 async function populateCameras() {
   const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
   const sel = $("camera-select");
@@ -301,18 +389,53 @@ async function populateCameras() {
 
 async function openCamera(deviceId) {
   stopCamera();
+  // Same request shape as static/features/camera-capture.js.
+  const ideal = {
+    width: { ideal: PREVIEW_REQUEST.width },
+    height: { ideal: PREVIEW_REQUEST.height },
+    frameRate: { ideal: PREVIEW_REQUEST.frameRate },
+  };
+  state.requestedResolution = `${PREVIEW_REQUEST.width}x${PREVIEW_REQUEST.height}`;
   try {
     state.stream = await navigator.mediaDevices.getUserMedia({
-      video: deviceId ? { deviceId: { exact: deviceId } } : true,
+      video: deviceId ? { deviceId: { exact: deviceId }, ...ideal } : ideal,
       audio: false,
     });
   } catch (err) {
     stageMsg(`Could not open camera (${err.name}).`);
     return;
   }
+  state.track = state.stream.getVideoTracks()[0] || null;
+
+  // BLOCK 3.22: ask the device for its best practical resolution.
+  if (state.track && typeof state.track.getCapabilities === "function") {
+    try {
+      const caps = state.track.getCapabilities();
+      const wMax = Math.min(caps.width?.max || PREVIEW_REQUEST.width, MAX_CAPTURE_DIM);
+      const hMax = Math.min(caps.height?.max || PREVIEW_REQUEST.height, MAX_CAPTURE_DIM);
+      if (wMax > PREVIEW_REQUEST.width || hMax > PREVIEW_REQUEST.height) {
+        state.requestedResolution = `${wMax}x${hMax}`;
+        await state.track.applyConstraints({ width: { ideal: wMax }, height: { ideal: hMax } });
+      }
+      state.capabilitiesAvailable = true;
+    } catch {
+      state.capabilitiesAvailable = true; // constraints applied best-effort
+    }
+  } else {
+    state.capabilitiesAvailable = false;
+    note("getCapabilities() unsupported — using constraints only; recording achieved resolution");
+  }
+
+  const s = state.track ? state.track.getSettings() : {};
+  state.achievedResolution = s.width && s.height ? `${s.width}x${s.height}` : "";
   const video = $("preview");
   video.srcObject = state.stream; // srcObject only — never drawn for display
   stageMsg("");
+  note(
+    `camera: requested ${state.requestedResolution} → achieved ${
+      state.achievedResolution || "?"
+    } (${state.capabilitiesAvailable ? "getCapabilities ok" : "constraints only"})`,
+  );
   video.addEventListener(
     "loadedmetadata",
     () => {
@@ -328,6 +451,7 @@ function stopCamera() {
     state.stream.getTracks().forEach((t) => t.stop());
     state.stream = null;
   }
+  state.track = null;
   const v = $("preview");
   if (v) v.srcObject = null;
 }
@@ -338,16 +462,6 @@ function deviceLabel() {
 }
 
 // ---------- stage / box editor ----------
-
-function setStageKind(kind) {
-  state.stageKind = kind;
-  $("preview").hidden = kind !== "camera";
-  $("upload-preview").hidden = kind === "camera";
-  $("btn-capture").textContent =
-    kind === "camera" ? "Capture (c)" : kind === "upload" ? "Save upload (c)" : "Save changes (c)";
-  $("btn-upload-label").hidden = kind === "inspect";
-  layoutBox();
-}
 
 function mediaDims() {
   if (state.stageKind === "camera") {
@@ -398,6 +512,7 @@ function layoutBox() {
   const c = contentRect();
   const b = state.boxImg;
   const box = $("sample-box");
+  if (!box) return;
   box.style.left = `${c.x + b.x * c.scale}px`;
   box.style.top = `${c.y + b.y * c.scale}px`;
   box.style.width = `${b.w * c.scale}px`;
@@ -406,7 +521,7 @@ function layoutBox() {
 
 function wireBoxEditor() {
   const box = $("sample-box");
-  let mode = null; // "move" | "nw" | "ne" | "sw" | "se"
+  let mode = null;
   let startX = 0;
   let startY = 0;
   let orig = null;
@@ -415,7 +530,9 @@ function wireBoxEditor() {
     const s = contentRect().scale || 1;
     return { dx: dx / s, dy: dy / s };
   }
-
+  function markDirtyIfInspect() {
+    if (state.stageKind === "inspect") sm.setPending({ dirtyInspect: true });
+  }
   function onDown(ev) {
     mode = ev.target.classList.contains("bh")
       ? [...ev.target.classList].find((c) => ["nw", "ne", "sw", "se"].includes(c))
@@ -448,6 +565,7 @@ function wireBoxEditor() {
     layoutBox();
   }
   function onUp() {
+    if (mode) markDirtyIfInspect();
     mode = null;
   }
   box.addEventListener("pointerdown", onDown);
@@ -463,6 +581,7 @@ function wireBoxEditor() {
     else if (ev.key === "ArrowDown") b.y += step;
     else return;
     ev.preventDefault();
+    markDirtyIfInspect();
     layoutBox();
   });
 
@@ -477,16 +596,36 @@ function stageMsg(text) {
 
 // ---------- capture / upload / save ----------
 
-function frameToBlob() {
+/** Grab the live track at full achieved resolution as an ImageBitmap (BLOCK
+ *  3.24). Falls back to drawImage(<video>) if createImageBitmap is unavailable.
+ *  Returns { blob, capturePath, achieved }. */
+async function frameToBlob() {
   const v = $("preview");
+  const w = v.videoWidth;
+  const h = v.videoHeight;
   const canvas = document.createElement("canvas");
-  canvas.width = v.videoWidth;
-  canvas.height = v.videoHeight;
-  canvas.getContext("2d").drawImage(v, 0, 0, canvas.width, canvas.height);
-  return new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.92));
+  canvas.width = w;
+  canvas.height = h;
+  const gctx = canvas.getContext("2d");
+  let capturePath = "element";
+  try {
+    if (typeof createImageBitmap === "function") {
+      const bmp = await createImageBitmap(v);
+      gctx.drawImage(bmp, 0, 0, w, h);
+      bmp.close?.();
+      capturePath = "imagebitmap";
+    } else {
+      gctx.drawImage(v, 0, 0, w, h);
+    }
+  } catch {
+    gctx.drawImage(v, 0, 0, w, h);
+    capturePath = "element";
+  }
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/jpeg", 0.95));
+  return { blob, capturePath, achieved: `${w}x${h}` };
 }
 
-async function postSample(blob, { source, originalFilename }) {
+async function postSample(blob, { source, originalFilename, capturePath, achieved }) {
   clampBox();
   const b = state.boxImg;
   const form = new FormData();
@@ -499,6 +638,9 @@ async function postSample(blob, { source, originalFilename }) {
   form.append("device_label", source === "camera" ? deviceLabel() : "");
   if (originalFilename) form.append("original_filename", originalFilename);
   form.append("consent_ack", $("consent-ack").checked ? "true" : "false");
+  form.append("capture_path", capturePath || (source === "upload" ? "upload" : "element"));
+  form.append("requested_resolution", source === "camera" ? state.requestedResolution : "");
+  form.append("encoded_quality", "0.95");
 
   const r = await fetch(`/api/objects/${state.objectId}/samples`, { method: "POST", body: form });
   if (!r.ok) {
@@ -506,10 +648,13 @@ async function postSample(blob, { source, originalFilename }) {
     return false;
   }
   const body = await r.json();
-  const flags = (body.sample.quality && body.sample.quality.flags) || [];
-  note(flags.length ? `saved — flagged: ${flags.join(", ")}` : "saved");
+  const sm2 = body.sample || {};
+  const flags = (sm2.quality && sm2.quality.flags) || [];
+  const dims = sm2.achieved_resolution ? ` @ ${sm2.achieved_resolution}` : "";
+  note(flags.length ? `saved${dims} — flagged: ${flags.join(", ")}` : `saved${dims}`);
   await refreshObject();
   await loadObjects();
+  render(sm.snapshot());
   return true;
 }
 
@@ -520,12 +665,17 @@ async function onCaptureClick() {
       note("no camera — upload images instead");
       return;
     }
-    const blob = await frameToBlob();
-    await postSample(blob, { source: "camera" });
+    const { blob, capturePath, achieved } = await frameToBlob();
+    // camera captures save immediately, so they are never "pending"
+    await postSample(blob, { source: "camera", capturePath, achieved });
   } else if (state.stageKind === "upload") {
     const file = state.uploadQueue[0];
     if (!file) return;
-    const ok = await postSample(file, { source: "upload", originalFilename: file.name });
+    const ok = await postSample(file, {
+      source: "upload",
+      originalFilename: file.name,
+      capturePath: "upload",
+    });
     if (ok) nextUpload();
   } else if (state.stageKind === "inspect") {
     await saveInspect();
@@ -552,7 +702,7 @@ function showUpload() {
   state.uploadUrl = URL.createObjectURL(file);
   const img = $("upload-preview");
   img.onload = () => {
-    setStageKind("upload");
+    sm.dispatch("capture", { count: state.uploadQueue.length });
     centreBox();
     note(`upload ${state.uploadQueue.length} queued — adjust the box, then Save upload`);
   };
@@ -561,17 +711,22 @@ function showUpload() {
 
 function nextUpload() {
   state.uploadQueue.shift();
-  if (state.uploadQueue.length) showUpload();
-  else clearUploadQueue();
+  if (state.uploadQueue.length) {
+    sm.setPending({ uploads: state.uploadQueue.length });
+    showUpload();
+  } else {
+    clearUploadQueue();
+  }
 }
 
-function clearUploadQueue() {
+function clearUploadQueue({ silent = false } = {}) {
   state.uploadQueue = [];
   if (state.uploadUrl) {
     URL.revokeObjectURL(state.uploadUrl);
     state.uploadUrl = null;
   }
-  if (state.stageKind !== "camera") setStageKind("camera");
+  sm.setPending({ uploads: 0 });
+  if (!silent && (sm.state === "capturing")) sm.dispatch("back_to_camera");
 }
 
 // ---------- review strip + inspector ----------
@@ -603,14 +758,13 @@ function renderSamples(samples) {
 }
 
 async function inspectSample(s) {
-  state.editingSampleId = s.sample_id;
+  sm.dispatch("review", { sampleId: s.sample_id });
   if (state.uploadUrl) {
     URL.revokeObjectURL(state.uploadUrl);
     state.uploadUrl = null;
   }
   const img = $("upload-preview");
   img.onload = () => {
-    setStageKind("inspect");
     state.boxImg = { x: s.box[0], y: s.box[1], w: s.box[2], h: s.box[3] };
     layoutBox();
   };
@@ -618,35 +772,8 @@ async function inspectSample(s) {
   setConditions(s.conditions);
   const roleInput = document.querySelector(`input[name="role"][value="${s.role}"]`);
   if (roleInput) roleInput.checked = true;
-  ensureInspectActions();
   await loadObjects();
-}
-
-function ensureInspectActions() {
-  if ($("inspect-actions")) {
-    $("inspect-actions").hidden = false;
-    return;
-  }
-  const bar = el("div", { class: "inspect-actions", id: "inspect-actions" }, [
-    el("button", {
-      class: "btn btn-danger",
-      type: "button",
-      text: "Discard sample",
-      onClick: discardInspect,
-    }),
-    el("button", {
-      class: "btn btn-secondary",
-      type: "button",
-      text: "Back to camera",
-      onClick: () => {
-        state.editingSampleId = null;
-        $("inspect-actions").hidden = true;
-        setStageKind("camera");
-        loadObjects();
-      },
-    }),
-  ]);
-  $("capture-note").before(bar);
+  render(sm.snapshot());
 }
 
 async function saveInspect() {
@@ -668,6 +795,7 @@ async function saveInspect() {
     return;
   }
   note("sample updated");
+  sm.setPending({ dirtyInspect: false });
   await refreshObject();
 }
 
@@ -676,9 +804,7 @@ async function discardInspect() {
   if (!sid || !window.confirm("Discard this sample? (soft delete — files move to _deleted/)")) return;
   const r = await fetch(`/api/objects/${state.objectId}/samples/${sid}`, { method: "DELETE" });
   if (!r.ok) note(`delete failed: ${await r.text()}`);
-  state.editingSampleId = null;
-  $("inspect-actions").hidden = true;
-  setStageKind("camera");
+  sm.dispatch("discard");
   await refreshObject();
   await loadObjects();
 }
@@ -713,6 +839,15 @@ function note(text) {
   $("capture-note").textContent = String(text);
 }
 
+function wireInspectActions() {
+  // The inspect action bar is a permanent element in index.html; show/hide is
+  // driven by render() only (BLOCK 3.17 - controls do not vanish mid-session).
+  $("btn-inspect-discard").addEventListener("click", discardInspect);
+  $("btn-inspect-back").addEventListener("click", () => {
+    if (sm.can("back_to_camera")) sm.dispatch("back_to_camera");
+  });
+}
+
 function wireKeys() {
   window.addEventListener("keydown", (ev) => {
     if (ev.target.matches("input, select, textarea")) return;
@@ -722,6 +857,9 @@ function wireKeys() {
     } else if (ev.key === "d" && state.editingSampleId) {
       ev.preventDefault();
       discardInspect();
+    } else if (ev.key === "Escape" && sm.state !== "browsing" && sm.state !== "object_selected") {
+      ev.preventDefault();
+      sm.dispatch("back_to_camera");
     }
   });
 }
@@ -742,18 +880,21 @@ async function loadModelBadge() {
 async function main() {
   await enter();
   wireExit();
+  sm.subscribe(render);
   state.vocab = await fetch("/api/objects/vocab").then((r) => r.json());
   buildConditionSelects();
   wireNewObject();
   wireObjectMeta();
   wireBoxEditor();
   wireUpload();
+  wireInspectActions();
   wireKeys();
   $("btn-capture").addEventListener("click", onCaptureClick);
   $("btn-reset-box").addEventListener("click", centreBox);
   await loadModelBadge();
   await loadObjects();
   await startCamera();
+  render(sm.snapshot());
 }
 
 main();

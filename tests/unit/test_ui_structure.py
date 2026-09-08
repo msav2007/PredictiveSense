@@ -131,11 +131,31 @@ def test_policy_controls_and_unknown_rendering_present() -> None:
     detection = _read(_STATIC / "features" / "detection.js")
     assert "/static/features/policy.js" in detection
     assert "Recognition policy" in detection
+    # Phase 5: the UI states plainly that thresholds are unfitted defaults.
+    assert "thresholdsFitted" in detection
+    assert "unfitted" in detection.lower()
     overlay = _read(_STATIC / "features" / "overlay.js")
     assert "Unknown" in overlay and "effectiveDetection" in overlay
     diagnostics = _read(_GROUPS / "diagnostics.js")
-    assert "policy_rejected_out_of_domain" in diagnostics
+    # Phase 5 renamed the count key; the per-detection detail is relocated here.
+    assert "policy_suppressed_implausible" in diagnostics
+    assert "policy_rejected_out_of_domain" not in diagnostics
     assert "raw" in diagnostics and "decided" in diagnostics
+    for needle in ("raw class", "runner-up", "rule that fired", "effective threshold"):
+        assert needle in diagnostics, f"diagnostics.js missing recognition detail row {needle!r}"
+
+
+def test_overlay_unknown_label_is_exactly_unknown() -> None:
+    """BLOCK 11.7 / 3.10: the resting overlay label for an unknown detection is
+    exactly ``Unknown`` - no ``(was Clock)``, no raw class, no rule name."""
+
+    overlay = _read(_STATIC / "features" / "overlay.js")
+    assert "(was " not in overlay, "overlay.js must not render `(was <class>)` on the resting label"
+    assert 'resting = "Unknown"' in overlay
+    # the raw class is only used for the de-emphasised `secondary` real label and
+    # the Diagnostics-only `suppressed` reveal, never for the unknown label.
+    policy = _read(_STATIC / "features" / "policy.js")
+    assert 'label: "Unknown"' in policy
 
 
 def test_overlay_never_touches_the_video_element() -> None:
