@@ -39,7 +39,9 @@ from pydantic import BaseModel, Field
 from predictivesense import __version__
 from predictivesense.api import ingest as ingest_router
 from predictivesense.api import labels as labels_router
+from predictivesense.api import objects as objects_router
 from predictivesense.api import recorder as recorder_router
+from predictivesense.api import studio as studio_router
 from predictivesense.api import videos as videos_router
 from predictivesense.api.broadcast import Broadcaster, serve_state_client
 from predictivesense.camera.browser import BrowserSource
@@ -126,6 +128,9 @@ def create_app(
     # recorded runs apply the identical policy code.
     app.state.policy = analysis_loop.policy
     app.state.session_id = uuid.uuid4().hex
+    # Phase 4: Object Learning Studio lifecycle. While active, the analysis loop
+    # is paused and api/ingest.py refuses new frames.
+    app.state.studio = {"active": False, "token": None, "prior": None}
     app.state.ingest_stats = {
         "frames": 0.0,
         "malformed": 0.0,
@@ -138,6 +143,8 @@ def create_app(
     app.include_router(recorder_router.router)
     app.include_router(videos_router.router)
     app.include_router(labels_router.router)
+    app.include_router(objects_router.router)
+    app.include_router(studio_router.router)
     if _STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 

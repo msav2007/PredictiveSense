@@ -50,6 +50,14 @@ async def ws_ingest(websocket: WebSocket) -> None:
         _LOG.info("ingest connection refused: capture.owner=%s", config.capture.owner)
         return
 
+    # Phase 4: no analysis frames may reach the pipeline while the Object
+    # Learning Studio is open (the loop is paused; this closes the door fully).
+    studio = getattr(app.state, "studio", None)
+    if isinstance(studio, dict) and studio.get("active"):
+        await websocket.close(code=4409)  # policy: Object Learning Studio is open
+        _LOG.info("ingest connection refused: Object Learning Studio is active")
+        return
+
     source = getattr(app.state, "browser_source", None)
     if not isinstance(source, BrowserSource):
         await websocket.close(code=1011)

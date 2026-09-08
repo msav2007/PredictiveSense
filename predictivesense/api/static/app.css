@@ -58,8 +58,36 @@ body {
   grid-template-columns: minmax(45%, 1fr) var(--panel-w);
   grid-template-rows: var(--topbar-h) 1fr;
   min-height: 100vh;
+  position: relative; /* anchors the panel resize handle */
 }
 .app-shell[data-collapsed="true"] { --panel-w: 46px; }
+
+/* ---- panel resize handle (Phase 4) ---- */
+
+.panel-resizer {
+  position: absolute;
+  top: var(--topbar-h);
+  bottom: 0;
+  right: var(--panel-w);
+  width: 12px;
+  margin-right: -6px;
+  z-index: 28;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.panel-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 5px;
+  border-radius: 2px;
+  background: var(--line);
+  transition: background 120ms ease;
+}
+.panel-resizer:hover::before,
+.panel-resizer:focus-visible::before { background: var(--accent); }
+.panel-resizer:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.app-shell[data-collapsed="true"] .panel-resizer { display: none; }
 
 .topbar {
   grid-column: 1 / -1;
@@ -232,4 +260,20 @@ details.advanced > summary::-webkit-details-marker { display: none; }
     transform: translateX(0); transition: transform 160ms ease;
   }
   .app-shell[data-collapsed="true"] .control-panel { transform: translateX(calc(100% - 46px)); }
+  /* the drag handle only makes sense while the panel is a grid column */
+  .panel-resizer { display: none; }
 }
+
+/* ---- overflow safety: fix the layout, never shrink the font (Block 4.8.31) ---- */
+
+html, body { max-width: 100%; overflow-x: hidden; }
+.topbar { flex-wrap: nowrap; overflow: hidden; }
+.tb-left { flex: 1 1 auto; overflow: hidden; }
+.tb-brand, .tb-mode { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-right { flex: 0 0 auto; }
+.control-panel, .panel-scroll, .group, .group-body, .setting-row { min-width: 0; }
+.line-list li { min-width: 0; }
+.line-list li > span:first-child {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+select, .readout, .kv-list dd { overflow: hidden; text-overflow: ellipsis; }

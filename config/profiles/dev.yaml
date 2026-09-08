@@ -151,3 +151,35 @@ eval:
   val_fraction: 0.5             # session-disjoint; test opened once, at the end
   test_fraction: 0.5
   split_seed: 20260908
+
+# Phase 4 Object Learning Studio - environment-specific object DATA COLLECTION.
+# No model is trained here; storing images is not training. The object dataset is
+# strictly separate from the Phase 2.5 evaluation set (data/eval). Quality
+# thresholds and coverage targets are collection HEURISTICS, not validated
+# metrics - see docs/decisions.md.
+objects:
+  root: data/objects
+  max_image_mb: 12
+  thumbnail_px: 240
+  blur_var_min: 60.0            # variance-of-Laplacian; below -> "blurry" flag (not auto-deleted)
+  min_box_area_frac: 0.01
+  duplicate_hamming_max: 6      # dHash Hamming distance for the near-duplicate flag
+  coverage_targets:
+    min_positives: 20
+    min_views: 4
+    min_distances: 2
+    min_lighting: 2
+    min_occluded: 2
+    min_hard_negatives: 5
+
+studio:
+  # Entering /studio stops monitoring (worker terminated, ingest socket closed,
+  # perception disabled, analysis loop paused); leaving restores it exactly.
+  stop_monitoring_on_enter: true
+
+ui:
+  panel:
+    default_width_px: 380
+    min_width_px: 300
+    max_width_px: 560
+    max_width_frac: 0.40

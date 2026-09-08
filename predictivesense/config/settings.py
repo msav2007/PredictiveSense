@@ -34,6 +34,11 @@ __all__ = [
     "PolicyConfig",
     "DatasetConfig",
     "EvalConfig",
+    "ObjectsConfig",
+    "CoverageTargetsConfig",
+    "StudioConfig",
+    "PanelConfig",
+    "UiConfig",
     "available_profiles",
     "load_config",
     "default_profiles_dir",
@@ -353,6 +358,75 @@ class EvalConfig(_Section):
     split_seed: int = Field(ge=0, default=20260908)
 
 
+class CoverageTargetsConfig(_Section):
+    """Phase 4 data-collection guidance thresholds.
+
+    These are **heuristics chosen for data-collection guidance, not scientific
+    quality metrics** (``docs/decisions.md``). They drive the Studio's
+    "3 views, no far-distance samples" prompts; they are not a pass/fail gate and
+    there is no composite score.
+    """
+
+    min_positives: int = Field(gt=0, default=20)
+    min_views: int = Field(gt=0, default=4)
+    min_distances: int = Field(gt=0, default=2)
+    min_lighting: int = Field(gt=0, default=2)
+    min_occluded: int = Field(ge=0, default=2)
+    min_hard_negatives: int = Field(ge=0, default=5)
+
+
+class ObjectsConfig(_Section):
+    """Phase 4 Object Learning Studio - environment-specific object data
+    collection. Storing images is not training; nothing here trains a model."""
+
+    root: Path = Field(default=Path("data/objects"))
+    max_image_mb: float = Field(gt=0, default=12.0)
+    thumbnail_px: int = Field(gt=0, default=240)
+    # Heuristic guidance threshold - variance-of-Laplacian below this marks a
+    # sample "blurry" for the developer to review (not auto-deleted). See
+    # docs/decisions.md.
+    blur_var_min: float = Field(gt=0.0, default=60.0)
+    min_box_area_frac: float = Field(gt=0.0, le=1.0, default=0.01)
+    # dHash Hamming distance at/below which two samples of the same object are
+    # flagged near-duplicates.
+    duplicate_hamming_max: int = Field(ge=0, default=6)
+    coverage_targets: CoverageTargetsConfig = Field(default_factory=CoverageTargetsConfig)
+
+
+class StudioConfig(_Section):
+    """Phase 4 Studio lifecycle."""
+
+    # Entering /studio stops the monitoring pipeline (worker terminated, ingest
+    # socket closed, perception disabled, analysis loop paused). Leaving restores
+    # it. Off is unsupported by the UI and only exists for tests.
+    stop_monitoring_on_enter: bool = True
+
+
+class PanelConfig(_Section):
+    """Phase 4 operations-panel resize constraints (Block 4.8)."""
+
+    default_width_px: int = Field(gt=0, default=380)
+    min_width_px: int = Field(gt=0, default=300)
+    max_width_px: int = Field(gt=0, default=560)
+    # The panel also never exceeds this fraction of the window, and the viewport
+    # never drops below (1 - this) - 0.05 of the window.
+    max_width_frac: float = Field(gt=0.0, lt=1.0, default=0.40)
+
+    @field_validator("max_width_px")
+    @classmethod
+    def _max_ge_min(cls, value: int, info: Any) -> int:
+        min_px = info.data.get("min_width_px")
+        if isinstance(min_px, int) and value < min_px:
+            raise ValueError("ui.panel.max_width_px must be >= min_width_px")
+        return value
+
+
+class UiConfig(_Section):
+    """Phase 4 UI state served to the dashboard shell."""
+
+    panel: PanelConfig = Field(default_factory=PanelConfig)
+
+
 class AppConfig(BaseSettings):
     """The fully resolved configuration for one run.
 
@@ -383,6 +457,9 @@ class AppConfig(BaseSettings):
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    objects: ObjectsConfig = Field(default_factory=ObjectsConfig)
+    studio: StudioConfig = Field(default_factory=StudioConfig)
+    ui: UiConfig = Field(default_factory=UiConfig)
 
     def as_json_dict(self) -> dict[str, Any]:
         """Resolved config as a JSON-serialisable dict (for the manifest and API)."""

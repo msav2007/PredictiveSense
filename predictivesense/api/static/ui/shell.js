@@ -8,8 +8,9 @@
 import { store } from "/static/ui/store.js";
 import { setDebugEnabled } from "/static/ui/log.js";
 import { MODE_LABELS, STATUS_LABELS } from "/static/ui/format.js";
+import { mountResizer } from "/static/ui/resizer.js";
 
-export function mountShell(root) {
+export function mountShell(root, { panel } = {}) {
   const $ = (id) => root.querySelector(`#${id}`);
 
   const shell = $("app-shell") || root;
@@ -40,6 +41,8 @@ export function mountShell(root) {
 
   render(store.get());
   store.subscribe(render);
+
+  mountResizer(shell, { panel });
 
   return {
     /** Show a full-viewport message (empty state / camera loss / backend mode). */

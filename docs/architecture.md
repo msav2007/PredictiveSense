@@ -594,3 +594,77 @@ No tracker, association, `Relation`, temporal state, risk, alert policy, TTS -
 fine-tuning. `unknown` reduces confident errors but adds no new class - objects
 outside the model's vocabulary (watch, spectacles, charger, headphones, shaker)
 stay unrecognised until a custom-trained model in a later phase.
+
+---
+
+# Phase 4 - Object Learning Studio & operations panel
+
+## Shape
+
+```
+/studio (standalone page)  ── POST /api/studio/enter ──▶  AnalysisLoop.pause()
+   camera preview (srcObject only, no worker)              consumer: no iterate
+   object CRUD + sample capture/upload                     producer: no read
+        │                                                  /ws/ingest: closed (4409)
+        ▼
+  data/objects/objects.json          (ObjectRegistry - profiles, versions, counts)
+  data/objects/<id>/images/*.jpg
+  data/objects/<id>/manifest.json    (SampleStore - box, tags, quality, provenance)
+  data/objects/_deleted/             (soft-deleted profiles + samples)
+
+   ── POST /api/studio/leave ──▶  AnalysisLoop.resume()   (prior state restored)
+
+scripts/export_objects_coco.py  ──▶  data/objects/coco_train.json + coco_val.json
+   (sample-disjoint split; refuses if it overlaps data/eval)
+
+models/registry.json  ──  predictivesense/models/registry.py  ──  GET /api/models/registry
+   (read / validate / resolve the active version; NO activation code, NO training)
+```
+
+## Packages
+
+- `predictivesense/objects/` - **stdlib + numpy only.** `vocab` (fixed condition
+  dimensions, role/kind/status sets, `confusable_with` seeds), `registry`
+  (`ObjectProfile` CRUD, slug ids, atomic writes, soft delete), `samples`
+  (`ObjectSample` records, one box each, provenance, atomic manifest, soft
+  delete), `quality` (Laplacian variance, dHash, near-duplicate scan, coverage
+  guidance strings).
+- `predictivesense/models/` - `registry` reads/validates/resolves
+  `models/registry.json`. Exactly one `active`; file SHA-256s cross-checked
+  against `models/manifest.json` when the filename is known. No new model, no
+  activation logic.
+- `predictivesense/api/objects.py` - the `/api/objects*` surface (Block 9 table)
+  plus `GET /api/objects/vocab` and `GET /api/objects/{id}/samples/{sid}/image`.
+  Image codec via `camera/_opencv.py` so `cv2` stays out of `api/`.
+- `predictivesense/api/studio.py` - `GET /studio`, `POST /api/studio/enter|leave`,
+  `GET /api/studio/status`, `GET /api/models/registry`.
+
+## Studio lifecycle
+
+`AnalysisLoop` gained `pause()` / `resume()` / `paused` - a dedicated
+`threading.Event` separate from the debug stall. Paused: the consumer runs no
+iteration at all (no perception, no snapshot), the producer reads no frames.
+`api/ingest.py` additionally refuses `/ws/ingest` (close 4409) while
+`app.state.studio["active"]`. `enter` records a prior-state token; `leave`
+resumes only if this session paused it, and 409s on a token mismatch. The Studio
+page opens its own `getUserMedia` preview (`<video>.srcObject` only, no worker).
+
+## Operations panel resize
+
+`static/ui/resizer.js` - `clampPanelWidth` (min 300, max min(560, 40% window),
+viewport >= 45%), a `requestAnimationFrame`-throttled pointer drag that batches
+one read + one write, keyboard (`role="separator"`, arrows, `Home`, double-click
+reset), width persisted in `store.js` as `panelWidth` and applied as an inline
+`--panel-w` on `.app-shell`. Mounted by `shell.js`. `ui.panel.*` config is served
+read-only; there is no API route and no server state. The `#preview` element is
+never touched.
+
+## Still absent after Phase 4
+
+No training or fine-tuning; no model activation/replacement; no
+instance-recognition inference (the `kind: "instance"` field is stored, unread);
+no tracker, `Relation`, temporal state, risk, alert policy, TTS - none started,
+none placeheld. `StateSnapshot.tracks` is still `[]`. Recognition is byte-for-byte
+unchanged: Phase 4 touched no perception or policy code. The object dataset is
+empty until the developer collects it; watch / spectacles / charger / headphones
+/ shaker remain unrecognised until a custom model is trained in a later phase.

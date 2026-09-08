@@ -1,6 +1,10 @@
-/* Dataset & recording group (both modes): record a research sample, scenario
- * tag, notes, consent, and the recorded-clip list. Logic lives in
- * features/recording.js.
+/* Dataset & recording group (both modes).
+ *
+ * Two separate workflows, deliberately kept apart (P4 Block 4.9.34):
+ *   - Record sample: a scenario *video clip* -> data/raw/ (features/recording.js).
+ *   - Object Learning Studio: object *still images* with one box each ->
+ *     data/objects/ . It is a separate screen at /studio; entering it stops
+ *     monitoring. This group only links to it.
  */
 "use strict";
 
@@ -37,7 +41,22 @@ export function render(body) {
 
   const clipList = el("ul", { id: "clip-list", class: "line-list" });
 
+  const studioLink = el("a", {
+    class: "btn btn-secondary",
+    href: "/studio",
+    id: "open-studio",
+    text: "Open Object Learning Studio →",
+  });
+
   body.append(
+    el("p", { class: "subhead", text: "Object Learning" }),
+    el("p", {
+      class: "setting-hint",
+      text:
+        "Teach PredictiveSense the objects in this environment by capturing images with one box each. Opening the Studio stops monitoring. Separate from Record sample and stored under data/objects.",
+    }),
+    studioLink,
+    el("p", { class: "subhead", text: "Record sample (scenario clips)" }),
     recordBtn,
     settingRow("Scenario tag", scenario),
     settingRow("Notes", notes),

@@ -35,9 +35,11 @@ tests/fixtures/*.mp4
 tests/fixtures/*.mkv
 
 # Phase 2 model weights + fetched licence text - never committed. Only
-# models/manifest.json (names, sha256, licences, input sizes) is tracked.
+# models/manifest.json (names, sha256, licences, input sizes) and the Phase 4
+# model version registry are tracked.
 models/*
 !models/manifest.json
+!models/registry.json
 
 # DirectML benchmark environment (Block 9): separate venv, plain onnxruntime + DML
 .venv-dml/

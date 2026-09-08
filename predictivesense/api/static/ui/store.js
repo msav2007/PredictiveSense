@@ -1,8 +1,9 @@
 /* Tiny observable holding UI state.
  *
  * Persisted keys (localStorage): mode, diagnosticsVisible, panelCollapsed,
- * openGroups. Runtime-only keys (never persisted): snapshot, status, note, and
- * the feature-published summary blocks (cameraInfo, videoInfo, datasetInfo).
+ * panelWidth, openGroups. Runtime-only keys (never persisted): snapshot, status,
+ * note, and the feature-published summary blocks (cameraInfo, videoInfo,
+ * datasetInfo).
  *
  * Subscribers are held in a Set and each subscribe() returns an unsubscribe
  * function - there is no unbounded listener list.
@@ -11,12 +12,19 @@
 
 const KEY = "ps.ui";
 
-const PERSISTED_KEYS = ["mode", "diagnosticsVisible", "panelCollapsed", "openGroups"];
+const PERSISTED_KEYS = [
+  "mode",
+  "diagnosticsVisible",
+  "panelCollapsed",
+  "panelWidth",
+  "openGroups",
+];
 
 const DEFAULTS = {
   mode: "realtime", // "realtime" | "recorded" - client-side view state only
   diagnosticsVisible: false,
   panelCollapsed: false,
+  panelWidth: null, // px; null = use the config default. Clamped by ui/resizer.js.
   openGroups: { input: true, camera: true, video: true, dataset: true, diagnostics: false },
 };
 
@@ -103,6 +111,14 @@ export const store = {
 
   togglePanel() {
     this.setPanelCollapsed(!state.panelCollapsed);
+  },
+
+  setPanelWidth(px) {
+    const v = Number.isFinite(px) ? Math.round(px) : null;
+    if (state.panelWidth === v) return;
+    state.panelWidth = v;
+    persist();
+    notify();
   },
 
   isGroupOpen: (id) => state.openGroups[id] !== false,

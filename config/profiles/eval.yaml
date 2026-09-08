@@ -120,3 +120,30 @@ eval:
   val_fraction: 0.5
   test_fraction: 0.5
   split_seed: 20260908
+
+# Phase 4 - identical Studio / panel settings to dev so both modes behave the
+# same. No model is trained; the object dataset is separate from data/eval.
+objects:
+  root: data/objects
+  max_image_mb: 12
+  thumbnail_px: 240
+  blur_var_min: 60.0
+  min_box_area_frac: 0.01
+  duplicate_hamming_max: 6
+  coverage_targets:
+    min_positives: 20
+    min_views: 4
+    min_distances: 2
+    min_lighting: 2
+    min_occluded: 2
+    min_hard_negatives: 5
+
+studio:
+  stop_monitoring_on_enter: true
+
+ui:
+  panel:
+    default_width_px: 380
+    min_width_px: 300
+    max_width_px: 560
+    max_width_frac: 0.40

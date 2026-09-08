@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PredictiveSense — Object Learning Studio</title>
+  <link rel="stylesheet" href="/static/app.css" />
+  <link rel="stylesheet" href="/static/studio/studio.css" />
+</head>
+<body>
+  <div class="studio" id="studio">
+    <header class="studio-topbar">
+      <div class="st-left">
+        <span class="tb-brand">Object Learning Studio</span>
+        <span class="st-note" id="monitoring-note">Monitoring stopped while this screen is open</span>
+      </div>
+      <div class="st-right">
+        <span class="st-model" id="active-model" title="Active model version (read-only)">model —</span>
+        <a class="btn btn-secondary" id="btn-return" href="/">Save and return</a>
+      </div>
+    </header>
+
+    <div class="studio-body">
+      <!-- object registry -->
+      <aside class="studio-objects" aria-label="Objects">
+        <div class="so-head">
+          <span class="subhead">Objects</span>
+          <button class="btn btn-primary" id="btn-new-object" type="button">New</button>
+        </div>
+        <form class="new-object" id="new-object-form" hidden>
+          <input type="text" id="no-name" placeholder="Name (e.g. watch)" autocomplete="off" />
+          <select id="no-kind">
+            <option value="class">class</option>
+            <option value="instance">instance</option>
+          </select>
+          <input type="text" id="no-parent" placeholder="Parent class (instances only)" autocomplete="off" hidden />
+          <input type="text" id="no-category" placeholder="Category (optional)" autocomplete="off" />
+          <div class="no-actions">
+            <button class="btn btn-primary" id="no-create" type="submit">Create</button>
+            <button class="btn btn-secondary" id="no-cancel" type="button">Cancel</button>
+          </div>
+        </form>
+        <ul class="object-list" id="object-list"></ul>
+      </aside>
+
+      <!-- capture -->
+      <main class="studio-capture">
+        <div class="empty-state" id="empty-state">Select or create an object to start collecting images.</div>
+
+        <section class="capture-pane" id="capture-pane" hidden>
+          <div class="cp-headline">
+            <h2 id="obj-title">—</h2>
+            <div class="cp-meta">
+              <label>Kind <span id="obj-kind">—</span></label>
+              <label>Samples <span id="obj-count">0</span></label>
+              <button class="btn btn-secondary" id="btn-rename" type="button">Edit metadata</button>
+              <button class="btn btn-danger" id="btn-delete-object" type="button">Delete object</button>
+            </div>
+          </div>
+
+          <div class="confusable-prompt" id="confusable-prompt" hidden></div>
+
+          <div class="cp-grid">
+            <div class="stage-wrap">
+              <div class="stage" id="stage">
+                <video id="preview" autoplay muted playsinline></video>
+                <img id="upload-preview" alt="" hidden />
+                <div class="sample-box" id="sample-box" tabindex="0" aria-label="Bounding box (arrow keys nudge)">
+                  <span class="bh nw"></span><span class="bh ne"></span>
+                  <span class="bh sw"></span><span class="bh se"></span>
+                </div>
+              </div>
+              <div class="stage-msg" id="stage-msg" hidden></div>
+            </div>
+
+            <div class="cp-controls">
+              <div class="setting-row">
+                <label class="setting-label" for="camera-select">Camera</label>
+                <select id="camera-select"></select>
+              </div>
+
+              <div class="role-row" role="radiogroup" aria-label="Sample role">
+                <label><input type="radio" name="role" value="positive" checked /> Positive</label>
+                <label><input type="radio" name="role" value="hard_negative" /> Hard negative</label>
+                <label><input type="radio" name="role" value="negative" /> Negative</label>
+              </div>
+
+              <div class="conditions" id="conditions"></div>
+
+              <label class="consent-row">
+                <input type="checkbox" id="consent-ack" />
+                <span>Consent acknowledged for everyone on camera</span>
+              </label>
+
+              <div class="capture-actions">
+                <button class="btn btn-primary" id="btn-capture" type="button">Capture (c)</button>
+                <button class="btn btn-secondary" id="btn-reset-box" type="button">Centre box</button>
+                <label class="btn btn-secondary" id="btn-upload-label">
+                  Upload images…
+                  <input type="file" id="upload-input" accept="image/*" multiple hidden />
+                </label>
+              </div>
+              <p class="note" id="capture-note"></p>
+            </div>
+          </div>
+
+          <div class="review">
+            <div class="review-head">
+              <span class="subhead">Session captures &amp; all samples</span>
+              <span class="review-count" id="review-count">0</span>
+            </div>
+            <ul class="review-strip" id="review-strip"></ul>
+          </div>
+        </section>
+      </main>
+
+      <!-- coverage guidance -->
+      <aside class="studio-coverage" aria-label="Collection guidance">
+        <span class="subhead">Collection guidance</span>
+        <p class="setting-hint">Heuristics for what to collect next — not a quality score.</p>
+        <div class="kv-list" id="coverage-kv"></div>
+        <span class="subhead">Guidance</span>
+        <ul class="guidance-list" id="guidance-list"><li>Select an object.</li></ul>
+      </aside>
+    </div>
+  </div>
+
+  <script src="/static/studio/studio.js" type="module"></script>
+</body>
+</html>

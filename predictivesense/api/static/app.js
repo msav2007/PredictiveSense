@@ -50,7 +50,7 @@ async function main() {
 
   for (const g of GROUPS) registerGroup(g);
 
-  mountShell(document.getElementById("app-shell"));
+  mountShell(document.getElementById("app-shell"), { panel: runtime.config.ui?.panel });
   mountRegistry(document.getElementById("panel-body"), { runtime });
 
   initAnalysisClient();

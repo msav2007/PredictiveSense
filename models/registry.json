@@ -1,0 +1,32 @@
+{
+  "_comment": "Phase 4 model version registry. Read/validated by predictivesense/models/registry.py. Activation is a deliberate operation - there is no code that flips 'active'; a human edits this file. No model has been trained: v1 is the pre-exported Phase 2 detector + pose (Ultralytics YOLO11n ONNX). The .onnx files themselves are git-ignored (see models/manifest.json / .gitignore); only their SHA-256s are tracked here and must match models/manifest.json.",
+  "version": 1,
+  "active": "v1",
+  "models": [
+    {
+      "version_id": "v1",
+      "name": "baseline-yolo11n",
+      "task": "detect+pose",
+      "files": [
+        {
+          "role": "detector",
+          "path": "models/yolo11n.onnx",
+          "sha256": "634279b40c07c6391472c51ad45b81ebc48706a9a1fe72dd3396322acd0c053b",
+          "size_bytes": 10930182
+        },
+        {
+          "role": "pose",
+          "path": "models/yolo11n-pose.onnx",
+          "sha256": "93e2866b0ce678f99b4dd88af0c12e9ea2edf079a361dc2ecbc6226b77ff6408",
+          "size_bytes": 11853451
+        }
+      ],
+      "source": "Ultralytics YOLO11n / YOLO11n-pose, pre-exported ONNX (github.com/ultralytics/assets v8.3.0). Fetched + SHA-256-verified by scripts/fetch_models.py.",
+      "created_utc": "2026-09-08T00:00:00.000000Z",
+      "license": "AGPL-3.0-only",
+      "metrics_ref": "results/eval_yolo11n_policy-on_val.json",
+      "active": true,
+      "notes": "Baseline. Phase 2.5 evaluation harness output at metrics_ref is PENDING the developer's val labels (data/eval is unlabelled as of Phase 4); see docs/phase-reports/phase2_5.md and docs/attribution.md. Recognition is unchanged by Phase 4."
+    }
+  ]
+}

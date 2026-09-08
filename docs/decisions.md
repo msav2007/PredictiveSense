@@ -343,3 +343,92 @@ state, risk, or voice; no training or fine-tuning.
   (`test_no_forbidden_imports.py`) is unchanged and still passes (`cv2` /
   `onnxruntime` stay scoped to `camera/` + `perception/`; the eval *scripts*
   that need `cv2.imread` live in `scripts/`, outside the scanned package).
+
+## Phase 4 - Object Learning Studio & operations panel (2026-09-08)
+
+- **New packages `predictivesense/objects/` and `predictivesense/models/` are
+  stdlib + numpy only.** No new runtime dependency. Laplacian variance and dHash
+  are implemented directly in `objects/quality.py` (a 3x3 `valid` correlation and
+  an area-average block-reduce). Image *codec* work (decode uploads, normalise to
+  JPEG q92, thumbnail) is done via new helpers in `camera/_opencv.py`
+  (`decode_image_bgr` / `encode_jpeg` / `thumbnail_jpeg`) so `cv2` stays out of
+  `predictivesense/api/` - the same precedent Phase 2.5 set with
+  `camera/_opencv.read_image_bgr`. `test_no_forbidden_imports.py` is unchanged
+  and still passes.
+- **The Studio stops monitoring by pausing the analysis loop.**
+  `AnalysisLoop.pause()` / `resume()` set a dedicated `threading.Event`
+  (distinct from the time-bounded debug stall): while paused the consumer runs
+  **no** iteration (no perception, no snapshot) and the producer reads no
+  frames. `POST /api/studio/enter` pauses it and records a prior-state token;
+  `POST /api/studio/leave` resumes it (only if *this* Studio session paused it)
+  and validates the token (409 on mismatch). Re-entering is idempotent (a page
+  reload gets the same token). "No frames may reach `/ws/ingest`" is enforced
+  additionally in `api/ingest.py`: while `app.state.studio["active"]` the socket
+  is closed with code 4409 before `accept()`. The Studio page attaches no
+  analysis worker. `test_studio_lifecycle.py` asserts zero perception calls and
+  a refused ingest socket over a bounded interval, and that leaving restores the
+  loop and the preview-independence stall invariant.
+- **`ObjectProfile` / `ObjectSample` are their own contracts under
+  `objects/`, not additions to `core/types.py`.** `core/types.py` is the frozen
+  wire format for the perception/tracking pipeline; the object *collection*
+  store is a separate concern (like `dataset/` for the eval set). Both schemas
+  carry `kind: "class" | "instance"` now; **no instance-recognition inference
+  exists** - the field is stored, nothing reads it.
+- **Every object sample carries exactly one box, validated against the image
+  bounds** (`objects/samples.py:_validate_box`, 1 px rounding tolerance). A box
+  outside bounds, a non-positive size, or a missing box is a loud failure
+  (400 / 422). Manifests (`objects.json`, per-object `manifest.json`) are written
+  atomically (`os.replace` of a `.tmp` sibling). Deletion of a profile **or** a
+  sample is always soft: the folder / image files move to `_deleted/` and the
+  API says where.
+- **Quality thresholds are data-collection heuristics, not scientific quality
+  metrics, and there is deliberately no composite 0-100 score.**
+  `objects.blur_var_min` (60.0, variance-of-Laplacian over the box crop),
+  `objects.min_box_area_frac` (0.01), `objects.duplicate_hamming_max` (6, dHash
+  Hamming), and every `objects.coverage_targets.*` value are guidance for *what
+  to collect next* ("3 views, no far-distance samples, no occluded samples"). A
+  flagged sample is marked (`quality.flags`), never auto-deleted - the developer
+  decides. Documented as heuristics here per Block 4.4.16.
+- **`confusable_with` is seeded from the developer's observed failure modes**
+  (`objects/vocab.py:CONFUSABLE_SEEDS`): watch <-> clock/bracelet/hand/donut,
+  headphones <-> person, mug/cup <-> phone/bowl/glass, bottle/shaker <->
+  can/cylinder, keyboard <-> remote, can <-> phone. A new profile inherits the
+  seed for its slug; the developer edits it per object. The Studio prompts for
+  hard negatives when an object has a `confusable_with` list and zero
+  `hard_negative` samples.
+- **The object dataset (training data) and the Phase 2.5 evaluation set (test
+  data) must never merge.** `data/objects/` is git-ignored (under `data/**`),
+  strictly separate from `data/eval/`. `scripts/export_objects_coco.py` runs
+  `check_dataset_separation()` before every export and **exits non-zero writing
+  nothing** if any object image **content hash**, image **path**, or **source
+  identifier** (an uploaded `original_filename` vs an eval image's
+  `ps_provenance.source_clip`) appears in both. `tests/unit/test_dataset_separation.py`
+  covers all three and the refusal. The exporter produces a **sample-disjoint**
+  train/val split of its own (deterministic per `sample_id` hash, each object in
+  both splits, >= 1 train sample per object); it never touches `data/eval/`.
+- **`models/registry.json` is tracked** (a `.gitignore` exception alongside
+  `models/manifest.json`); the `.onnx` weights stay ignored. `predictivesense/models/registry.py`
+  reads / validates / resolves it: exactly one `active` version, every file
+  SHA-256 a real 64-hex string and - when the filename is known to
+  `models/manifest.json` - matching it. **There is no activation code**; a human
+  edits `active`. v1 is the existing pre-exported YOLO11n detector + pose; its
+  `metrics_ref` points at the pending Phase 2.5 `val` eval file.
+  `GET /api/models/registry` degrades gracefully (`{"available": false, ...}`)
+  rather than crashing when the file is missing/malformed.
+- **Panel width is client-side UI state, persisted like the collapsed flag.**
+  `store.js` gains `panelWidth` (px, `null` = config default) in `PERSISTED_KEYS`.
+  `static/ui/resizer.js` owns the drag handle: a pure `clampPanelWidth(width,
+  winWidth, cfg)` (min `ui.panel.min_width_px` 300; max the smaller of
+  `max_width_px` 560 and `max_width_frac` 0.40 of the window; the viewport keeps
+  >= 45%), a `requestAnimationFrame`-throttled pointer drag that batches its one
+  read (`innerWidth`) and one write (`--panel-w`), keyboard support
+  (`role="separator"`, arrows step 16 px, `Home` / double-click reset to the
+  default), and width applied as an inline `--panel-w` on `.app-shell` (removed
+  while collapsed so the CSS `46px` rule wins). No API route, no server state -
+  `ui.panel.*` is served read-only in `/api/config`. `#preview` is untouched
+  (still asserted by `test_ui_structure.py`).
+- **Record Sample was investigated, not changed.** Root cause of the reported
+  weakness: browser `MediaRecorder` WebM often has no duration element OpenCV's
+  FFmpeg build can read, so `ClipManifest.duration_s` is stored `null` (handled
+  gracefully everywhere). Environmental, larger than this phase - documented in
+  `docs/phase-reports/phase4.md`, save location and manifest format unchanged.

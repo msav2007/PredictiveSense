@@ -77,6 +77,11 @@ class AnalysisLoop:
         self._stale_after_ms = config.consumer.stale_after_ms
 
         self._stop_evt = threading.Event()
+        # Phase 4: the Object Learning Studio pauses monitoring while it is open.
+        # Set == paused: the consumer runs no iteration (no perception, no
+        # snapshot) and the producer reads no frames. Distinct from the
+        # time-bounded debug stall.
+        self._pause_evt = threading.Event()
         self._producer: threading.Thread | None = None
         self._consumer: threading.Thread | None = None
         self._started = False
@@ -129,6 +134,27 @@ class AnalysisLoop:
             "producer": bool(self._producer and self._producer.is_alive()),
             "consumer": bool(self._consumer and self._consumer.is_alive()),
         }
+
+    @property
+    def paused(self) -> bool:
+        """True while monitoring is paused (Studio open)."""
+
+        return self._pause_evt.is_set()
+
+    def pause(self) -> None:
+        """Pause monitoring: the consumer stops iterating (no perception, no
+        snapshot) and the producer stops reading. Idempotent."""
+
+        if not self._pause_evt.is_set():
+            self._pause_evt.set()
+            _LOG.info("analysis loop paused (Object Learning Studio)")
+
+    def resume(self) -> None:
+        """Resume monitoring after :meth:`pause`. Idempotent."""
+
+        if self._pause_evt.is_set():
+            self._pause_evt.clear()
+            _LOG.info("analysis loop resumed")
 
     def request_consumer_stall(self, seconds: float) -> float:
         """Artificially stall the consumer for up to 10 s (preview-independence).
@@ -230,6 +256,9 @@ class AnalysisLoop:
         producer_rate = self.metrics.rate("producer")
         try:
             while not self._stop_evt.is_set():
+                if self._pause_evt.is_set():
+                    self._stop_evt.wait(0.05)
+                    continue
                 frame = self._source.read()
                 if frame is None:
                     if not self._source.is_running:
@@ -244,6 +273,11 @@ class AnalysisLoop:
         next_due = time.monotonic()
         try:
             while not self._stop_evt.is_set():
+                if self._pause_evt.is_set():
+                    # Studio open: run no iteration at all.
+                    self._stop_evt.wait(0.05)
+                    next_due = time.monotonic()
+                    continue
                 now = time.monotonic()
                 if now < self._stall_until:
                     # Debug stall: do not consume. The producer + ingest socket
