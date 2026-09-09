@@ -85,6 +85,17 @@ async def studio_enter(request: Request) -> dict[str, Any]:
             "monitoring_stopped": state.get("prior", {}).get("stopped", {}),
         }
 
+    # Phase 7: clear staging directories older than the configured TTL so an
+    # abandoned bulk-upload batch never lingers (BLOCK 3.16).
+    try:
+        from predictivesense.api.object_batches import cleanup_stale_batches
+
+        removed = cleanup_stale_batches(request.app)
+        if removed:
+            _LOG.info("studio entry: removed %d stale upload batch(es)", removed)
+    except Exception as exc:  # noqa: BLE001 - cleanup must never block entry
+        _LOG.warning("studio entry: stale-batch cleanup failed: %r", exc)
+
     paused_by_us = False
     if config.studio.stop_monitoring_on_enter and loop is not None and not loop.paused:
         loop.pause()

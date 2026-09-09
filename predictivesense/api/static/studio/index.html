@@ -101,10 +101,14 @@
               </label>
 
               <div class="capture-actions">
-                <button class="btn btn-primary" id="btn-capture" type="button">Capture (c)</button>
+                <button class="btn btn-primary" id="btn-capture" type="button">Capture sample (c)</button>
                 <button class="btn btn-secondary" id="btn-reset-box" type="button">Centre box</button>
-                <label class="btn btn-secondary" id="btn-upload-label">
+                <label class="btn btn-secondary" id="btn-bulk-upload-label">
                   Upload images…
+                  <input type="file" id="bulk-upload-input" accept="image/*" multiple hidden />
+                </label>
+                <label class="btn btn-secondary" id="btn-upload-label">
+                  Add one image…
                   <input type="file" id="upload-input" accept="image/*" multiple hidden />
                 </label>
               </div>
@@ -124,6 +128,65 @@
             </div>
             <ul class="review-strip" id="review-strip"></ul>
           </div>
+
+          <!-- Phase 7: bulk image upload. Hidden until a batch is uploaded.
+               Boxes are PROPOSED from the detector's raw output; a proposal is
+               not ground truth until a human confirms it. No model is trained. -->
+          <section class="batch-panel" id="batch-panel" hidden aria-label="Bulk image upload">
+            <div class="batch-head">
+              <div>
+                <span class="subhead">Bulk upload</span>
+                <span class="batch-counts" id="batch-counts">—</span>
+              </div>
+              <div class="batch-head-actions">
+                <label class="setting-label" for="batch-role">Batch role</label>
+                <select id="batch-role">
+                  <option value="positive" selected>Positive</option>
+                  <option value="hard_negative">Hard negative</option>
+                  <option value="negative">Negative</option>
+                </select>
+                <button class="btn btn-secondary" id="btn-batch-attention" type="button">Jump to items needing a box</button>
+                <button class="btn btn-secondary" id="btn-batch-review" type="button">Review all</button>
+                <button class="btn btn-primary" id="btn-batch-save" type="button">Save all</button>
+                <button class="btn btn-danger" id="btn-batch-discard" type="button">Discard batch</button>
+                <button class="btn btn-secondary" id="btn-batch-close" type="button">Close</button>
+              </div>
+            </div>
+            <p class="note" id="batch-note"></p>
+            <ul class="batch-grid" id="batch-grid"></ul>
+
+            <div class="batch-reviewer" id="batch-reviewer" hidden>
+              <div class="br-stage-wrap">
+                <div class="stage" id="batch-stage">
+                  <img id="batch-img" alt="" />
+                  <div class="sample-box" id="batch-box" tabindex="0" aria-label="Proposed bounding box (arrow keys nudge)">
+                    <span class="bh nw"></span><span class="bh ne"></span>
+                    <span class="bh sw"></span><span class="bh se"></span>
+                  </div>
+                </div>
+                <div class="br-nav">
+                  <button class="btn btn-secondary" id="btn-br-prev" type="button">‹ Prev (p)</button>
+                  <span class="br-pos" id="br-pos">0 / 0</span>
+                  <button class="btn btn-secondary" id="btn-br-next" type="button">Next (n) ›</button>
+                </div>
+              </div>
+              <div class="br-controls">
+                <p class="br-status" id="br-status"></p>
+                <div class="role-row" role="radiogroup" aria-label="Item role">
+                  <label><input type="radio" name="br-role" value="positive" checked /> Positive</label>
+                  <label><input type="radio" name="br-role" value="hard_negative" /> Hard negative</label>
+                  <label><input type="radio" name="br-role" value="negative" /> Negative</label>
+                </div>
+                <div class="conditions" id="br-conditions"></div>
+                <div class="capture-actions">
+                  <button class="btn btn-primary" id="btn-br-accept" type="button">Accept box (a)</button>
+                  <button class="btn btn-secondary" id="btn-br-add" type="button">Add box</button>
+                  <button class="btn btn-danger" id="btn-br-delete" type="button">Delete box (x)</button>
+                </div>
+                <p class="setting-hint">A proposed box is not verified until you move, resize, draw or accept it.</p>
+              </div>
+            </div>
+          </section>
         </section>
       </main>
 

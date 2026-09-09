@@ -36,6 +36,7 @@ __all__ = [
     "DatasetConfig",
     "EvalConfig",
     "ObjectsConfig",
+    "BatchConfig",
     "CoverageTargetsConfig",
     "StudioConfig",
     "PanelConfig",
@@ -415,6 +416,23 @@ class CoverageTargetsConfig(_Section):
     min_hard_negatives: int = Field(ge=0, default=5)
 
 
+class BatchConfig(_Section):
+    """Phase 7 bulk image upload - a data-collection accelerator for the Object
+    Learning Studio. Boxes are *proposed* from the existing detector's raw
+    output; nothing here trains, fine-tunes or activates a model."""
+
+    max_images: int = Field(gt=0, default=60)
+    max_total_mb: float = Field(gt=0, default=400.0)
+    staging_ttl_hours: float = Field(gt=0, default=24.0)
+    # Deliberately low - a proposal only needs a rectangle, not a confident
+    # class. The detector's predicted label is stored as a hint, never used as
+    # the sample's class (see docs/decisions.md).
+    proposal_min_score: float = Field(ge=0.0, le=1.0, default=0.10)
+    thumbnail_px: int = Field(gt=0, default=240)
+    # An image whose shorter side is below this is rejected with a reason.
+    min_image_px: int = Field(gt=0, default=32)
+
+
 class ObjectsConfig(_Section):
     """Phase 4 Object Learning Studio - environment-specific object data
     collection. Storing images is not training; nothing here trains a model."""
@@ -431,6 +449,7 @@ class ObjectsConfig(_Section):
     # flagged near-duplicates.
     duplicate_hamming_max: int = Field(ge=0, default=6)
     coverage_targets: CoverageTargetsConfig = Field(default_factory=CoverageTargetsConfig)
+    batch: BatchConfig = Field(default_factory=BatchConfig)
 
 
 class StudioConfig(_Section):

@@ -190,6 +190,18 @@ objects:
     min_lighting: 2
     min_occluded: 2
     min_hard_negatives: 5
+  # Phase 7 bulk image upload. Boxes are PROPOSED from the detector's raw output
+  # (before the recognition policy - the policy would suppress exactly the box we
+  # want); the predicted label is a hint only, never the sample class. No model
+  # is trained here. proposal_min_score is deliberately low: we want a rectangle,
+  # not a confident class.
+  batch:
+    max_images: 60
+    max_total_mb: 400
+    staging_ttl_hours: 24
+    proposal_min_score: 0.10
+    thumbnail_px: 240
+    min_image_px: 32
 
 studio:
   # Entering /studio stops monitoring (worker terminated, ingest socket closed,

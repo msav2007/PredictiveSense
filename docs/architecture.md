@@ -819,3 +819,92 @@ phase.
 No model trained or fine-tuned. No tracker, `Relation`, temporal state, risk,
 alert policy, TTS, Scene Snapshot Studio, session memory - none started, none
 placeheld. `StateSnapshot.tracks` is still `[]`.
+
+# Phase 7 - bulk image upload for the Object Learning Studio
+
+A data-collection accelerator: add ~20 samples to an object in one operation
+instead of capture -> box -> save, twenty times. **No training, no model swap,
+no tracker, no recognition-behaviour change, no new runtime dependency.** The
+camera-capture workflow is unchanged; both paths produce samples in the same
+format, with the same quality checks, provenance and dataset separation.
+
+## Flow
+
+Select an object -> **Upload images** -> pick many files -> the server stages
+them and proposes one box per image from the **existing detector's raw output**
+(before the recognition policy) -> the developer reviews/corrects in a grid + a
+Prev/Next reviewer -> **Save all** commits the reviewed items into the object's
+existing sample store through the *same* creation path the camera uses.
+
+## New modules
+
+- **`predictivesense/objects/batches.py`** - `BatchStore` over
+  `data/objects/<id>/_staging/<batch_id>/` (a `batch.json` manifest +
+  `<item>.jpg` / `<item>.thumb.jpg`). `create` / `add_staged_image` /
+  `update_item` / `set_status` / `set_progress` / `overwrite` / `list_batches` /
+  `discard` / `cleanup_stale(ttl_hours)`. `BatchItem` = the batch-item contract
+  (`item_id`, `filename`, `staged_path`, `thumbnail_path`, `width`, `height`,
+  `box`, `status` `ready|manual_required|edited|flagged|error`,
+  `proposal_source`, `proposal_raw_class`, `proposal_score`,
+  `box_confirmed_by_human`, `role`, `negative_for`, `conditions`, `quality`,
+  `error`). Stdlib + numpy only; atomic writes; nothing here enters
+  `manifest.json`, so staging is invisible to counts / coverage / the COCO
+  export by construction.
+- **`predictivesense/objects/proposals.py`** - `propose_box(raw_detections, w,
+  h, min_score) -> BoxProposal`. Highest score above `min_score`; ties: larger
+  area, then centre nearest the image centre. Empty/low -> `manual_required` +
+  `centred_default_box` (the camera path's seed). Class-agnostic: `raw_class` is
+  a hint, never the sample class. Stdlib + numpy only; never imports the
+  detector / `onnxruntime` / `cv2`.
+- **`predictivesense/api/object_batches.py`** - `POST/GET/PATCH/POST-save/DELETE
+  /api/objects/{id}/batches[/{bid}[/items/{iid}[/image]]]`. Upload validates
+  per-file (`objects.max_image_mb`) and total (`objects.batch.max_total_mb`)
+  size and `objects.batch.max_images`; rejects unsupported/corrupt/too-small
+  files with `{filename, reason}` and continues; stages accepted images
+  (normalised JPEG + server thumbnail) and starts proposals on a **1-worker**
+  `ThreadPoolExecutor` (the ORT session is shared - never one session per
+  image). The worker builds a `Frame`, calls `engine.detect(frame)` (raw,
+  **policy bypassed**), `propose_box`, `compute_sample_quality`
+  (`existing_hashes` = committed pHashes + earlier batch items); one image
+  failing -> that item `manual_required` + `error`, batch continues. All
+  manifest writes serialised under one module lock. **Save** commits every item
+  with a valid box via `persist_sample(...)` and reports
+  `{saved, remaining, skipped, batch_cleared}`; unresolved items stay staged.
+- **`static/studio/box-editor.js`** - the box editor **extracted verbatim** from
+  `studio.js` as `createBoxEditor({ stage, box, media, onChange })`. `studio.js`
+  builds one instance (`state.boxImg` aliases `editor.box`); the bulk-upload
+  reviewer builds a second on its own elements - one implementation.
+- **`static/studio/batch.js`** - `initBatch(deps)`: the whole bulk-upload panel
+  (`#batch-panel`, hidden until an upload). Multi-file `#bulk-upload-input`,
+  grid with server thumbnails + status badges, progressive polling with a
+  `N uploaded · P proposed · M need a box · R reviewed` count (grid rebuilt only
+  on a real change), a Review All reviewer (Prev/Next, the shared box editor,
+  delete-box, add-box, per-item role, condition tags with remembered defaults,
+  keys `n`/`p`/`a`/`x`), "jump to items needing a box", Save all, Discard batch.
+  It does **not** touch the Studio state machine; it is closed on object switch.
+
+## Changed, additively
+
+- `predictivesense/api/objects.py` - `persist_sample(...)` extracted (decode ->
+  quality -> normalise -> thumbnail -> `store.add`); `add_sample` calls it,
+  behaviour unchanged.
+- `ObjectSample` / `SampleStore.add` - five additive fields (`batch_id`,
+  `proposal_source`, `proposal_raw_class`, `proposal_score`,
+  `box_confirmed_by_human`), `None` on the camera path. Bulk-committed samples
+  carry `source: "upload_batch"`.
+- `PerceptionEngine.detect(frame)` - detector-only, no pose, no counters; for
+  the proposer. No recognition-behaviour change.
+- `config.objects.batch` (`max_images` 60 / `max_total_mb` 400 /
+  `staging_ttl_hours` 24 / `proposal_min_score` 0.10 / `thumbnail_px` 240 /
+  `min_image_px` 32), in `dev.yaml` + `eval.yaml`.
+- `POST /api/studio/enter` runs `cleanup_stale_batches(app)` (TTL sweep).
+- `scripts/export_objects_coco.py` - explicit `_staging` skip in
+  `_iter_object_samples`.
+
+## Still absent after Phase 7
+
+No model trained, fine-tuned or activated. No tracker, `Relation`, temporal
+state, risk, alert policy, TTS, Scene Snapshot Studio, session memory - none
+started, none placeheld. `StateSnapshot.tracks` is still `[]`. Recognition
+behaviour, the recognition policy, the vocabulary tiers, the evaluation dataset
+and the model registry are untouched.

@@ -591,3 +591,68 @@ state, risk, or voice; no training or fine-tuning.
   plausible on latency with no primary-tier detection loss on this clip, but is
   left for the developer to confirm on representative footage before changing the
   default.
+
+## Phase 7
+
+- **2026-09-09** **Bulk-upload box proposals use the detector's RAW output,
+  before the recognition policy** - deliberate. The policy exists to decide what
+  to *show the user during monitoring*; for a proposal we only want a rectangle.
+  A `watch` is routinely proposed as `donut` / `clock`, both in the policy's
+  `implausible` tier, which the policy would suppress - suppressing exactly the
+  box we want. `PerceptionEngine` does not apply the policy anyway (that happens
+  in `pipeline/loop.py` / `recorded.py`), so `engine.detect(frame)` (new,
+  detector-only, no pose) is the raw output. The predicted label is stored as
+  `proposal_raw_class` / `proposal_score` only - a **hint**, shown as "detector
+  hint: donut (0.42), not the label" - and is **never** the sample's class,
+  which is always the selected object.
+- **2026-09-09** **Proposal selection rule**: highest score above
+  `objects.batch.proposal_min_score` (default **0.10** - deliberately low, we
+  want a box not a confident class); ties broken by **larger box area, then box
+  centre nearest the image centre**. Detector-empty or all-below-threshold ->
+  the image is `manual_required` and seeded with `centred_default_box` (the same
+  30%/40% centred box the camera path seeds), never silently skipped. One image
+  failing (decode / inference) is caught: that item becomes `manual_required`
+  with the error string recorded; the batch continues.
+- **2026-09-09** **Staging lives at `data/objects/<id>/_staging/<batch_id>/`**
+  with a `batch.json` manifest, entirely outside `manifest.json`. Consequences,
+  all intentional: staged images are excluded from `SampleStore.counts()`,
+  `coverage_summary(...)` and `scripts/export_objects_coco.py` by construction
+  (the exporter also skips `_staging` paths explicitly now). Abandoning a batch
+  leaves no committed sample; an explicit **Discard batch** removes it, and
+  `POST /api/studio/enter` sweeps batches older than
+  `objects.batch.staging_ttl_hours` (default 24 h).
+- **2026-09-09** **One shared box editor.** The drag/resize/nudge editor was
+  extracted verbatim from `studio.js` into `static/studio/box-editor.js`
+  (`createBoxEditor({ stage, box, media, onChange })`). `studio.js` builds one
+  instance (`state.boxImg` aliases `editor.box`, so the rest of that file is
+  unchanged); the bulk-upload reviewer builds a second on its own DOM. No second
+  editor was written. The Studio state machine (`studio-state.js`) is **not**
+  touched - the bulk-upload panel is its own view owned by `batch.js`, shown /
+  hidden independently and closed on object switch, so the transition table and
+  its Python mirror (`test_studio_state_machine.py`) are unchanged.
+- **2026-09-09** **`box_confirmed_by_human`** (`ObjectSample`, additive; `None`
+  on the camera path) is a research-integrity field, not decoration: `false` for
+  an untouched proposal even after a bulk Save all; `true` once the developer
+  moved / resized / drew the box or pressed "Accept box". It lets a later
+  training phase report what fraction of the training set was detector-proposed
+  vs hand-drawn and test for proposal bias. Four more additive provenance fields
+  on a bulk-committed sample: `source: "upload_batch"`, `batch_id`,
+  `proposal_source` (`detector` | `manual` | `default_centred`),
+  `proposal_raw_class`, `proposal_score`.
+- **2026-09-09** **Progressive processing.** Upload returns immediately with a
+  `batch_id`; proposals run on a **1-worker** `ThreadPoolExecutor` (one shared
+  ORT session - never one per image; the Studio has paused the monitoring loop
+  so there is no contention, and a one-shot annotation run is **not** resuming
+  monitoring). The client polls `GET .../batches/{bid}` every 400 ms and rebuilds
+  the grid only when an item's status actually changed. Config caps
+  (`max_images` 60, `max_total_mb` 400, per-file `objects.max_image_mb`) fail
+  with a 4xx and a clear message, never a silent truncation.
+- **2026-09-09** **`persist_sample(...)` extracted** from `api/objects.py::
+  add_sample` as the single decode -> quality -> normalise -> thumbnail ->
+  `store.add` path, shared by the camera route and the bulk-upload save. The
+  camera route's behaviour is unchanged (`test_objects_api.py` unchanged and
+  green).
+- **2026-09-09** No new runtime dependency. `objects/batches.py` and
+  `objects/proposals.py` are stdlib + numpy only (like the rest of
+  `objects/`); `cv2` stays confined to `camera/` + `perception/` (the batch API
+  decodes/encodes via `camera/_opencv.py`, as the camera route already does).

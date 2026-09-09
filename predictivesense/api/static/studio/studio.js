@@ -24,6 +24,8 @@
 
 import { el } from "/static/ui/controls.js";
 import { createStudioState } from "/static/studio/studio-state.js";
+import { createBoxEditor } from "/static/studio/box-editor.js";
+import { initBatch } from "/static/studio/batch.js";
 
 const $ = (id) => document.getElementById(id);
 const COND_KEY = "ps.studio.conditions";
@@ -35,6 +37,11 @@ const PREVIEW_REQUEST = { width: 1280, height: 720, frameRate: 30 };
 const MAX_CAPTURE_DIM = 1920;
 
 const sm = createStudioState();
+
+// The one bounding-box editor, shared with the bulk-upload reviewer (batch.js).
+// `state.boxImg` is a live alias of the editor's box for the rest of this file.
+let editor = null;
+let batch = null;
 
 const state = {
   token: null,
@@ -297,6 +304,7 @@ async function selectObject(objectId) {
   // metadata, camera, box editor, coverage - with no reload and no stale
   // inspect controls.
   clearUploadQueue({ silent: true });
+  batch?.onObjectChange();
   sm.dispatch("select", { objectId });
   await loadObjects();
   await refreshObject();
@@ -546,120 +554,36 @@ function mediaDims() {
   return { w: img.naturalWidth || 0, h: img.naturalHeight || 0 };
 }
 
-function contentRect() {
-  const stage = $("stage").getBoundingClientRect();
-  const { w: mw, h: mh } = mediaDims();
-  if (!mw || !mh) return { x: 0, y: 0, w: stage.width, h: stage.height, scale: 1 };
-  const scale = Math.min(stage.width / mw, stage.height / mh);
-  return {
-    x: (stage.width - mw * scale) / 2,
-    y: (stage.height - mh * scale) / 2,
-    w: mw * scale,
-    h: mh * scale,
-    scale,
-  };
+/** Build (once) the shared box editor bound to the capture stage. `state.boxImg`
+ *  aliases the editor's live box object so the rest of this module is unchanged. */
+function ensureEditor() {
+  if (editor) return editor;
+  editor = createBoxEditor({
+    stage: $("stage"),
+    box: $("sample-box"),
+    media: mediaDims,
+    onChange: () => {
+      if (state.stageKind === "inspect") sm.setPending({ dirtyInspect: true });
+    },
+  });
+  state.boxImg = editor.box;
+  return editor;
 }
 
 function centreBox() {
-  const { w, h } = mediaDims();
-  if (!w || !h) {
-    state.boxImg = { x: 0, y: 0, w: 0, h: 0 };
-    layoutBox();
-    return;
-  }
-  state.boxImg = { x: Math.round(w * 0.3), y: Math.round(h * 0.3), w: Math.round(w * 0.4), h: Math.round(h * 0.4) };
-  layoutBox();
+  ensureEditor().centre();
 }
 
 function clampBox() {
-  const { w, h } = mediaDims();
-  if (!w || !h) return;
-  const b = state.boxImg;
-  b.w = Math.max(8, Math.min(b.w, w));
-  b.h = Math.max(8, Math.min(b.h, h));
-  b.x = Math.max(0, Math.min(b.x, w - b.w));
-  b.y = Math.max(0, Math.min(b.y, h - b.h));
+  ensureEditor().clamp();
 }
 
 function layoutBox() {
-  clampBox();
-  const c = contentRect();
-  const b = state.boxImg;
-  const box = $("sample-box");
-  if (!box) return;
-  box.style.left = `${c.x + b.x * c.scale}px`;
-  box.style.top = `${c.y + b.y * c.scale}px`;
-  box.style.width = `${b.w * c.scale}px`;
-  box.style.height = `${b.h * c.scale}px`;
+  ensureEditor().layout();
 }
 
 function wireBoxEditor() {
-  const box = $("sample-box");
-  let mode = null;
-  let startX = 0;
-  let startY = 0;
-  let orig = null;
-
-  function toImgDelta(dx, dy) {
-    const s = contentRect().scale || 1;
-    return { dx: dx / s, dy: dy / s };
-  }
-  function markDirtyIfInspect() {
-    if (state.stageKind === "inspect") sm.setPending({ dirtyInspect: true });
-  }
-  function onDown(ev) {
-    mode = ev.target.classList.contains("bh")
-      ? [...ev.target.classList].find((c) => ["nw", "ne", "sw", "se"].includes(c))
-      : "move";
-    startX = ev.clientX;
-    startY = ev.clientY;
-    orig = { ...state.boxImg };
-    box.setPointerCapture?.(ev.pointerId);
-    ev.preventDefault();
-  }
-  function onMove(ev) {
-    if (!mode) return;
-    const { dx, dy } = toImgDelta(ev.clientX - startX, ev.clientY - startY);
-    const b = state.boxImg;
-    if (mode === "move") {
-      b.x = orig.x + dx;
-      b.y = orig.y + dy;
-    } else {
-      if (mode.includes("w")) {
-        b.x = orig.x + dx;
-        b.w = orig.w - dx;
-      }
-      if (mode.includes("e")) b.w = orig.w + dx;
-      if (mode.includes("n")) {
-        b.y = orig.y + dy;
-        b.h = orig.h - dy;
-      }
-      if (mode.includes("s")) b.h = orig.h + dy;
-    }
-    layoutBox();
-  }
-  function onUp() {
-    if (mode) markDirtyIfInspect();
-    mode = null;
-  }
-  box.addEventListener("pointerdown", onDown);
-  window.addEventListener("pointermove", onMove);
-  window.addEventListener("pointerup", onUp);
-
-  box.addEventListener("keydown", (ev) => {
-    const step = ev.shiftKey ? 10 : 2;
-    const b = state.boxImg;
-    if (ev.key === "ArrowLeft") b.x -= step;
-    else if (ev.key === "ArrowRight") b.x += step;
-    else if (ev.key === "ArrowUp") b.y -= step;
-    else if (ev.key === "ArrowDown") b.y += step;
-    else return;
-    ev.preventDefault();
-    markDirtyIfInspect();
-    layoutBox();
-  });
-
-  window.addEventListener("resize", layoutBox);
+  ensureEditor().wire();
 }
 
 function stageMsg(text) {
@@ -700,11 +624,10 @@ async function frameToBlob() {
 }
 
 async function postSample(blob, { source, originalFilename, capturePath, achieved }) {
-  clampBox();
-  const b = state.boxImg;
+  const box = ensureEditor().getBox();
   const form = new FormData();
   form.append("image", blob, "sample.jpg");
-  form.append("box", JSON.stringify([Math.round(b.x), Math.round(b.y), Math.round(b.w), Math.round(b.h)]));
+  form.append("box", JSON.stringify(box));
   form.append("conditions", JSON.stringify(readConditions()));
   form.append("role", currentRole());
   form.append("negative_for", JSON.stringify([]));
@@ -839,8 +762,7 @@ async function inspectSample(s) {
   }
   const img = $("upload-preview");
   img.onload = () => {
-    state.boxImg = { x: s.box[0], y: s.box[1], w: s.box[2], h: s.box[3] };
-    layoutBox();
+    ensureEditor().setBox(s.box);
   };
   img.src = `/api/objects/${state.objectId}/samples/${s.sample_id}/image`;
   setConditions(s.conditions);
@@ -853,13 +775,12 @@ async function inspectSample(s) {
 async function saveInspect() {
   const sid = state.editingSampleId;
   if (!sid) return;
-  clampBox();
-  const b = state.boxImg;
+  const box = ensureEditor().getBox();
   const r = await fetch(`/api/objects/${state.objectId}/samples/${sid}`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      box: [Math.round(b.x), Math.round(b.y), Math.round(b.w), Math.round(b.h)],
+      box,
       conditions: readConditions(),
       role: currentRole(),
     }),
@@ -976,6 +897,18 @@ async function main() {
     wireUpload();
     wireInspectActions();
     wireKeys();
+    batch = initBatch({
+      vocab: state.vocab,
+      createBoxEditor,
+      getObjectId: () => state.objectId,
+      note,
+      // commit landed: refresh counts, samples and coverage without a reload
+      afterSave: async () => {
+        await refreshObject();
+        await loadObjects();
+        render(sm.snapshot());
+      },
+    });
     $("btn-capture").addEventListener("click", onCaptureClick);
     $("btn-reset-box").addEventListener("click", centreBox);
     await loadModelBadge();

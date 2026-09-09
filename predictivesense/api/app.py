@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from predictivesense import __version__
 from predictivesense.api import ingest as ingest_router
 from predictivesense.api import labels as labels_router
+from predictivesense.api import object_batches as object_batches_router
 from predictivesense.api import objects as objects_router
 from predictivesense.api import recorder as recorder_router
 from predictivesense.api import studio as studio_router
@@ -144,6 +145,7 @@ def create_app(
     app.include_router(videos_router.router)
     app.include_router(labels_router.router)
     app.include_router(objects_router.router)
+    app.include_router(object_batches_router.router)
     app.include_router(studio_router.router)
     if _STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")

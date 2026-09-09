@@ -77,6 +77,18 @@ class ObjectSample:
     achieved_resolution: str | None = None
     encoded_quality: float | None = None  # JPEG quality the original is stored at
     original_bytes: int | None = None  # size on disk of the full-resolution original
+    # -- Phase 7 bulk-upload provenance (additive; None on the camera path) ----
+    # ``source == "upload_batch"`` for a sample committed from a bulk upload.
+    batch_id: str | None = None
+    # How the box was arrived at: "detector" (proposed) | "manual" (hand-drawn)
+    # | "default_centred" (seeded, never touched).
+    proposal_source: str | None = None
+    proposal_raw_class: str | None = None  # detector's label HINT - never the sample class
+    proposal_score: float | None = None
+    # Research-integrity field (BLOCK 3.28): False for an unopened proposal saved
+    # via "accept all"; True for a box a human drew, moved, resized or explicitly
+    # accepted. None on the camera path (every camera box is hand-drawn).
+    box_confirmed_by_human: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -188,6 +200,11 @@ class SampleStore:
         requested_resolution: str | None = None,
         achieved_resolution: str | None = None,
         encoded_quality: float | None = None,
+        batch_id: str | None = None,
+        proposal_source: str | None = None,
+        proposal_raw_class: str | None = None,
+        proposal_score: float | None = None,
+        box_confirmed_by_human: bool | None = None,
     ) -> ObjectSample:
         validate_role(role)
         conds = validate_conditions(conditions)
@@ -231,6 +248,11 @@ class SampleStore:
             achieved_resolution=achieved_resolution or f"{int(width)}x{int(height)}",
             encoded_quality=(float(encoded_quality) if encoded_quality is not None else None),
             original_bytes=len(image_bytes),
+            batch_id=batch_id,
+            proposal_source=proposal_source,
+            proposal_raw_class=proposal_raw_class,
+            proposal_score=(float(proposal_score) if proposal_score is not None else None),
+            box_confirmed_by_human=box_confirmed_by_human,
         )
         doc = self._load()
         doc["samples"].append(sample.to_dict())

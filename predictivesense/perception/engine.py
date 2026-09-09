@@ -124,6 +124,20 @@ class PerceptionEngine:
             notes=tuple(notes),
         )
 
+    def detect(self, frame: Frame) -> list:
+        """Raw detector output for one frame - no pose, no recognition policy.
+
+        Used by the Phase 7 bulk-upload box proposer, which wants a rectangle,
+        not a classification, and must see the class the model actually emitted
+        (the policy would suppress exactly the box we want). Returns ``[]`` when
+        detection is disabled. Does not touch the per-frame counters used by
+        :meth:`infer`.
+        """
+
+        if self._detector is None:
+            return []
+        return list(self._detector.infer(frame))
+
     # -- introspection (Diagnostics rows, phase report) ------------
 
     def info(self) -> dict[str, object]:

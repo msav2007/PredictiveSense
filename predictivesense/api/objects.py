@@ -35,7 +35,7 @@ from predictivesense.objects.quality import (
     coverage_summary,
 )
 from predictivesense.objects.registry import ObjectRegistry, ObjectStoreError
-from predictivesense.objects.samples import SampleStore
+from predictivesense.objects.samples import ObjectSample, SampleStore
 from predictivesense.objects.vocab import (
     CONDITION_VOCAB,
     KINDS,
@@ -44,17 +44,109 @@ from predictivesense.objects.vocab import (
     default_conditions,
 )
 
-__all__ = ["router"]
+__all__ = ["router", "persist_sample"]
 
 _LOG = get_logger(__name__)
 router = APIRouter()
 
 
-def _parse_float(value: str, default: float) -> float:
+def _parse_float(value: Any, default: float) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def persist_sample(
+    store: SampleStore,
+    objects_cfg: Any,
+    *,
+    data: bytes,
+    box: Any,
+    conditions: dict[str, Any] | None,
+    role: str,
+    negative_for: list[str],
+    source: str,
+    device_label: str | None = None,
+    original_filename: str | None = None,
+    consent_ack: bool = False,
+    capture_path: str | None = None,
+    requested_resolution: str | None = None,
+    encoded_quality: Any = "",
+    extra_provenance: dict[str, Any] | None = None,
+) -> "ObjectSample":
+    """Decode + quality-check + normalise + thumbnail + persist one sample.
+
+    The single creation / validation / provenance path shared by the camera
+    capture route and the Phase 7 bulk-upload commit. Raises ``HTTPException``
+    (4xx) on a bad image or box; behaviour for the camera path is unchanged.
+    """
+
+    max_bytes = int(objects_cfg.max_image_mb * 1024 * 1024)
+    if len(data) == 0:
+        raise HTTPException(status_code=400, detail="empty image upload")
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"image exceeds {objects_cfg.max_image_mb} MB limit (objects.max_image_mb)",
+        )
+
+    img = decode_image_bgr(data)
+    if img is None:
+        raise HTTPException(status_code=400, detail="upload is not a readable image")
+    height, width = int(img.shape[0]), int(img.shape[1])
+
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        raise HTTPException(status_code=400, detail="box must be a JSON array [x, y, w, h]")
+
+    quality = compute_sample_quality(
+        img,
+        tuple(float(v) for v in box),
+        existing_hashes=store.existing_hashes(),
+        blur_var_min=objects_cfg.blur_var_min,
+        min_box_area_frac=objects_cfg.min_box_area_frac,
+        duplicate_hamming_max=objects_cfg.duplicate_hamming_max,
+    )
+
+    # Store the FULL-resolution original. A JPEG upload is kept verbatim so a
+    # Studio capture is not re-compressed (generation loss); any other format is
+    # normalised to JPEG q92 once. The thumbnail is always a separate, smaller
+    # file and never stands in for the original (BLOCK 3.23).
+    is_jpeg = data[:3] == b"\xff\xd8\xff"
+    try:
+        if is_jpeg:
+            norm_jpeg = data
+            stored_quality = _parse_float(encoded_quality, 0.92)
+        else:
+            norm_jpeg = encode_jpeg(img, quality=92)
+            stored_quality = 0.92
+        thumb = thumbnail_jpeg(img, objects_cfg.thumbnail_px)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"could not encode image: {exc}") from exc
+
+    try:
+        return store.add(
+            image_bytes=norm_jpeg,
+            width=width,
+            height=height,
+            box=box,
+            conditions=conditions,
+            role=role,
+            negative_for=[str(o) for o in negative_for],
+            quality=quality.to_dict(),
+            source=source,
+            device_label=device_label or None,
+            original_filename=original_filename or None,
+            consent_ack=bool(consent_ack),
+            thumb_bytes=thumb,
+            capture_path=capture_path or None,
+            requested_resolution=requested_resolution or None,
+            achieved_resolution=f"{width}x{height}",
+            encoded_quality=stored_quality,
+            **(extra_provenance or {}),
+        )
+    except (ObjectStoreError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # -- request models ------------------------------------------------
@@ -238,21 +330,7 @@ async def add_sample(
 ) -> dict[str, Any]:
     cfg = request.app.state.config.objects
     store = _sample_store(request, object_id)
-
-    max_bytes = int(cfg.max_image_mb * 1024 * 1024)
     data = await image.read()
-    if len(data) == 0:
-        raise HTTPException(status_code=400, detail="empty image upload")
-    if len(data) > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"image exceeds {cfg.max_image_mb} MB limit (objects.max_image_mb)",
-        )
-
-    img = decode_image_bgr(data)
-    if img is None:
-        raise HTTPException(status_code=400, detail="upload is not a readable image")
-    height, width = int(img.shape[0]), int(img.shape[1])
 
     try:
         box_val = json.loads(box)
@@ -260,58 +338,24 @@ async def add_sample(
         negative_for_val = json.loads(negative_for) if negative_for else []
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"bad JSON form field: {exc}") from exc
-    if not isinstance(box_val, (list, tuple)) or len(box_val) != 4:
-        raise HTTPException(status_code=400, detail="box must be a JSON array [x, y, w, h]")
-
-    quality = compute_sample_quality(
-        img,
-        tuple(float(v) for v in box_val),
-        existing_hashes=store.existing_hashes(),
-        blur_var_min=cfg.blur_var_min,
-        min_box_area_frac=cfg.min_box_area_frac,
-        duplicate_hamming_max=cfg.duplicate_hamming_max,
-    )
-
-    # Store the FULL-resolution original. A JPEG upload is kept verbatim so a
-    # Studio capture is not re-compressed (generation loss); any other format is
-    # normalised to JPEG q92 once. The thumbnail is always a separate, smaller
-    # file and never stands in for the original (BLOCK 3.23).
-    is_jpeg = data[:3] == b"\xff\xd8\xff"
-    try:
-        if is_jpeg:
-            norm_jpeg = data
-            stored_quality = _parse_float(encoded_quality, 0.92)
-        else:
-            norm_jpeg = encode_jpeg(img, quality=92)
-            stored_quality = 0.92
-        thumb = thumbnail_jpeg(img, cfg.thumbnail_px)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"could not encode image: {exc}") from exc
-    achieved_resolution = f"{width}x{height}"
 
     src = "upload" if source not in ("camera", "upload") else source
-    try:
-        sample = store.add(
-            image_bytes=norm_jpeg,
-            width=width,
-            height=height,
-            box=box_val,
-            conditions=conditions_val,
-            role=role,
-            negative_for=[str(o) for o in negative_for_val],
-            quality=quality.to_dict(),
-            source=src,
-            device_label=device_label or None,
-            original_filename=(original_filename or image.filename) if src == "upload" else None,
-            consent_ack=str(consent_ack).strip().lower() in {"true", "1", "yes", "on"},
-            thumb_bytes=thumb,
-            capture_path=(capture_path or ("upload" if src == "upload" else None)) or None,
-            requested_resolution=requested_resolution or None,
-            achieved_resolution=achieved_resolution,
-            encoded_quality=stored_quality,
-        )
-    except (ObjectStoreError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sample = persist_sample(
+        store,
+        cfg,
+        data=data,
+        box=box_val,
+        conditions=conditions_val,
+        role=role,
+        negative_for=[str(o) for o in negative_for_val],
+        source=src,
+        device_label=device_label,
+        original_filename=(original_filename or image.filename) if src == "upload" else None,
+        consent_ack=str(consent_ack).strip().lower() in {"true", "1", "yes", "on"},
+        capture_path=(capture_path or ("upload" if src == "upload" else None)),
+        requested_resolution=requested_resolution,
+        encoded_quality=encoded_quality,
+    )
 
     _sync_counts(request, object_id)
     return {"sample": sample.to_dict(), "coverage": _coverage_for(request, object_id)}

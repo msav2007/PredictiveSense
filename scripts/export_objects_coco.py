@@ -42,13 +42,24 @@ def image_content_hash(path: Path) -> str:
 
 
 def _iter_object_samples(root: Path):
-    """Yield ``(object_id, sample_record, image_path)`` for every stored sample."""
+    """Yield ``(object_id, sample_record, image_path)`` for every *committed*
+    sample.
+
+    Phase 7: bulk-upload staging lives under ``<object_id>/_staging/<batch_id>/``
+    and never enters ``manifest.json`` until **Save all**, so it is excluded from
+    this iteration (and therefore from every count, coverage figure and this
+    COCO export) by construction. The explicit guard below keeps that true even
+    if a future manifest bug wrote a staging path.
+    """
 
     reg = ObjectRegistry(root)
     for prof in reg.list():
         store = SampleStore(reg.object_dir(prof.object_id), prof.object_id)
         for sample in store.list():
-            img = reg.object_dir(prof.object_id) / sample["path"]
+            rel = str(sample.get("path", ""))
+            if "_staging" in Path(rel).parts:
+                continue
+            img = reg.object_dir(prof.object_id) / rel
             yield prof, sample, img
 
 

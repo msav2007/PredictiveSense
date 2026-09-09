@@ -153,6 +153,14 @@ objects:
     min_lighting: 2
     min_occluded: 2
     min_hard_negatives: 5
+  # Phase 7 bulk image upload - identical to dev so both modes behave the same.
+  batch:
+    max_images: 60
+    max_total_mb: 400
+    staging_ttl_hours: 24
+    proposal_min_score: 0.10
+    thumbnail_px: 240
+    min_image_px: 32
 
 studio:
   stop_monitoring_on_enter: true
