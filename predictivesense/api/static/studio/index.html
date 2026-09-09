@@ -8,6 +8,10 @@
   <link rel="stylesheet" href="/static/studio/studio.css" />
 </head>
 <body>
+  <!-- BLOCK 14: a module-load fault or unhandled rejection surfaces here, never
+       as a silent dead UI. Populated + shown by studio.js showFatal(). -->
+  <div class="studio-error-banner" id="studio-error" role="alert" hidden></div>
+
   <div class="studio" id="studio">
     <header class="studio-topbar">
       <div class="st-left">
@@ -19,6 +23,10 @@
         <a class="btn btn-secondary" id="btn-return" href="/">Save and return</a>
       </div>
     </header>
+
+    <!-- BLOCK 13: Diagnostics-visible Studio state readout. Pure function of the
+         state machine; updated by studio.js render(). -->
+    <div class="studio-diag" id="studio-diag" aria-live="polite">state=browsing</div>
 
     <div class="studio-body">
       <!-- object registry -->

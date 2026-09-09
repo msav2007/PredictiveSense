@@ -752,3 +752,70 @@ No model trained or fine-tuned; recognition of watch / spectacles / charger /
 headphones / shaker is unchanged. No tracker, `Relation`, temporal state, risk,
 alert policy, TTS - none started. `StateSnapshot.tracks` is still `[]`. No Scene
 Snapshot Studio (Phase 6).
+
+# Phase 6 - Studio repair (browser-verified) & recognition responsiveness
+
+## The structural fix - browser tests
+
+`tests/browser/` drives the **real app in headless Chromium** via Playwright
+(the single new `[dev]` dependency; base package only, fixtures hand-rolled - no
+`pytest-playwright`). `browser`-marked; skips cleanly when Playwright or its
+Chromium binary is absent. `conftest.py` runs uvicorn in a background thread on
+a free port with a temp `objects.root` seeded with two profiles, launches
+Chromium with `--use-fake-device-for-media-stream` so capture flows run
+headlessly, and attaches a console/`pageerror` collector (favicon 404 filtered).
+`test_studio_flow.py` covers the full BLOCK 4.7 list + the fake-camera capture
+path; `test_main_page.py` covers `/` (zero console errors, panel collapse/reopen,
+keyboard resize). Two prior phases shipped Studio frontend defects the
+Python-only suite reported as fixed because nothing loaded the page and clicked.
+
+## Studio root causes fixed (both browser-reproduced first)
+
+1. **Object row clicks were dead** (symptoms 1-4). `loadObjects()` built each
+   row with `el("li", { onClick: … })`; the `el()` primitive's generic `on*`
+   branch does `node.addEventListener(k.slice(2), v)` -> `addEventListener("Click")`
+   - DOM event types are case-sensitive, so the real `click` never fired. Rows
+   are also replaced by `replaceChildren` on every refresh. Fix:
+   `wireObjectList()` binds **one delegated `click` listener** to the stable
+   `#object-list` container (`ev.target.closest(".object-item")` -> `dataset.objectId`);
+   no per-row handler exists.
+2. **"Save and return" was dead** (symptoms 5-6). `studio-state.js` `TABLE.browsing`
+   had no `save_and_return` entry, so `dispatch("save_and_return")` from `browsing`
+   threw; `saveAndReturn()` is `async` and the click handler swallowed the throw as
+   an unhandled rejection - `leave()` + navigation never ran. Fix:
+   `TABLE.browsing` gains `save_and_return: "browsing"` (now reachable from every
+   state); `saveAndReturn()` guards with `sm.can()` and a belt-and-braces
+   `try/catch` so a transition quirk can never trap the user.
+
+## Studio robustness (additive)
+
+- **`showFatal()` + a `#studio-error` banner** - a module-load fault or unhandled
+  rejection surfaces as a visible in-page banner; `window` `error` /
+  `unhandledrejection` listeners and a `try/catch` around `main()` route to it.
+- **`refuseNote()`** - a refused transition (`sm.can()` false, or `save_and_return`
+  blocked by `hasPending`) always writes a visible `#capture-note`.
+- **`#studio-diag` readout** (BLOCK 13): `state · selected_object_id · has_pending
+  · last_refused_transition`, a pure function of the machine, updated by
+  `render()`. `studio-state.js` gained `lastRefused` (in `snapshot()`, a
+  `refuse()` setter, cleared by the next successful `dispatch` - cannot latch).
+- **Back to camera resets the box** - `render()` re-centres the box whenever the
+  stage returns to `camera` from `upload`/`inspect` (covers `back_to_camera`,
+  `discard`, `Escape`, upload-queue-drained), so a capture never inherits the
+  inspected sample's coordinates.
+
+## Recognition responsiveness - `scripts/benchmark_recognition_paths.py`
+
+Three bounded, measured experiments; **no model swap / quantisation / threading
+redesign**. Defines one canonical latency protocol (Protocol A isolated
+in-process warm; Protocol B end-to-end app loopback) and reconciles the Phase 2
+and Phase 5 detector figures under it - see `docs/decisions.md` and
+`docs/phase-reports/phase6.md`. Outcomes: pose gating - **no change justified**
+(person present in ~all frames of the one clip); detector input size 480 vs 640 -
+measured, left to the developer to flip. Config defaults **unchanged** this
+phase.
+
+## Still absent after Phase 6
+
+No model trained or fine-tuned. No tracker, `Relation`, temporal state, risk,
+alert policy, TTS, Scene Snapshot Studio, session memory - none started, none
+placeheld. `StateSnapshot.tracks` is still `[]`.

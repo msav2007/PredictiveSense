@@ -54,6 +54,30 @@ const state = {
   left: false,
 };
 
+// ---------- fatal-error surface (BLOCK 14) ----------
+
+/** A module-load fault or an unhandled rejection must show as a visible in-page
+ *  banner, never a silent dead UI. Idempotent; creates the element if the page
+ *  markup is missing it. */
+function showFatal(message) {
+  let bar = $("studio-error");
+  if (!bar) {
+    bar = el("div", { id: "studio-error", class: "studio-error-banner", role: "alert" });
+    document.body.prepend(bar);
+  }
+  bar.textContent =
+    `Studio error: ${message}. Reload the page; if it persists, open the browser console.`;
+  bar.hidden = false;
+}
+
+window.addEventListener("error", (ev) => {
+  showFatal(ev.message || String((ev.error && ev.error.message) || ev.error || "script error"));
+});
+window.addEventListener("unhandledrejection", (ev) => {
+  const r = ev.reason;
+  showFatal((r && (r.message || String(r))) || "unhandled promise rejection");
+});
+
 // ---------- lifecycle ----------
 
 async function enter() {
@@ -82,16 +106,26 @@ async function leave() {
 }
 
 async function saveAndReturn() {
-  // BLOCK 3.19: never silently discard a pending capture.
+  // BLOCK 3.19 / 5.12: never silently discard a pending capture - confirm only
+  // when there is genuinely something unsaved.
   if (sm.hasPending()) {
     const n = sm.context.pendingUploads;
     const what = n > 0 ? `${n} staged image${n === 1 ? "" : "s"}` : "unsaved edits to a sample";
     if (!window.confirm(`You have ${what} that have not been saved. Leave and discard them?`)) {
+      note("Still in the Studio — save or discard the staged capture, then Save and return.");
       return;
     }
     sm.setPending({ uploads: 0, dirtyInspect: false });
   }
-  sm.dispatch("save_and_return");
+  // State-machine bookkeeping must never block the actual navigation. Phase 5
+  // threw here from `browsing` (no `save_and_return` entry) and the async click
+  // handler swallowed it, so the button went dead. `save_and_return` is now
+  // valid from every state; the guard is belt-and-braces.
+  try {
+    if (sm.can("save_and_return")) sm.dispatch("save_and_return");
+  } catch {
+    /* never let a transition quirk trap the user in the Studio */
+  }
   await leave();
   window.location.href = "/";
 }
@@ -150,7 +184,33 @@ function render(snap) {
   for (const li of document.querySelectorAll(".object-item")) {
     li.classList.toggle("active", li.dataset.objectId === ctx.objectId);
   }
+
+  // Returning to the live camera from an upload/inspect stage must start from a
+  // fresh centred box, never the inspected sample's pixel coordinates
+  // (BLOCK 5.11 / 3 root cause). This covers back_to_camera, discard, Escape and
+  // the upload-queue-drained path uniformly.
+  if (ctx.stage === "camera" && state.prevStage && state.prevStage !== "camera") {
+    centreBox();
+  }
+  state.prevStage = ctx.stage;
+
+  renderDiag(snap);
   layoutBox();
+}
+
+/** Diagnostics-visible Studio state readout (BLOCK 13): the one place the state
+ *  machine's live state, selected object, pending guard and last refused
+ *  transition are shown. `has_pending` cannot latch - a successful transition
+ *  clears it and `lastRefused`. */
+function renderDiag(snap) {
+  const d = $("studio-diag");
+  if (!d) return;
+  d.textContent = [
+    `state=${snap.state}`,
+    `selected_object_id=${snap.context.objectId || "—"}`,
+    `has_pending=${sm.hasPending() ? "yes" : "no"}`,
+    `last_refused_transition=${snap.lastRefused || "—"}`,
+  ].join("   ·   ");
 }
 
 // ---------- objects ----------
@@ -160,12 +220,15 @@ async function loadObjects() {
   const body = await r.json();
   state.objects = body.objects || [];
   const list = $("object-list");
+  // Rows carry no per-node listener: `loadObjects()` calls `replaceChildren`
+  // on every refresh, so a per-row binding would be orphaned on the next
+  // render. Selection is handled by ONE delegated listener on this stable
+  // container, wired once in `main()` (BLOCK 4.7 / 15.4).
   list.replaceChildren(
     ...state.objects.map((o) => {
       const li = el("li", {
         class: "object-item" + (o.object_id === state.objectId ? " active" : ""),
         dataset: { objectId: o.object_id },
-        onClick: () => selectObject(o.object_id),
       });
       li.append(
         el("span", { class: "oi-name ellipsis", text: o.name, title: `${o.name} (${o.object_id})` }),
@@ -176,6 +239,17 @@ async function loadObjects() {
     }),
   );
   if (!state.objects.length) list.append(el("li", { class: "muted", text: "No objects yet." }));
+}
+
+/** One delegated click listener on the stable #object-list container. A row is
+ *  re-rendered on every `loadObjects()`; delegation from the parent means a
+ *  re-render can never orphan the binding (BLOCK 3 root cause #1, 4.7, 15.4). */
+function wireObjectList() {
+  $("object-list").addEventListener("click", (ev) => {
+    const row = ev.target.closest(".object-item");
+    if (!row || !row.dataset.objectId) return;
+    selectObject(row.dataset.objectId);
+  });
 }
 
 function wireNewObject() {
@@ -839,12 +913,23 @@ function note(text) {
   $("capture-note").textContent = String(text);
 }
 
+/** A refused transition must always tell the user why - a dead button with no
+ *  feedback is the defect that produced this phase (BLOCK 5.13 / 14). */
+function refuseNote(transition) {
+  sm.refuse(transition);
+  const why = sm.hasPending()
+    ? "there is an unsaved capture — save or discard it first"
+    : `not available from “${sm.state}”`;
+  note(`Can't ${transition.replace(/_/g, " ")} now: ${why}.`);
+}
+
 function wireInspectActions() {
   // The inspect action bar is a permanent element in index.html; show/hide is
   // driven by render() only (BLOCK 3.17 - controls do not vanish mid-session).
   $("btn-inspect-discard").addEventListener("click", discardInspect);
   $("btn-inspect-back").addEventListener("click", () => {
     if (sm.can("back_to_camera")) sm.dispatch("back_to_camera");
+    else refuseNote("back_to_camera");
   });
 }
 
@@ -878,23 +963,30 @@ async function loadModelBadge() {
 }
 
 async function main() {
-  await enter();
-  wireExit();
-  sm.subscribe(render);
-  state.vocab = await fetch("/api/objects/vocab").then((r) => r.json());
-  buildConditionSelects();
-  wireNewObject();
-  wireObjectMeta();
-  wireBoxEditor();
-  wireUpload();
-  wireInspectActions();
-  wireKeys();
-  $("btn-capture").addEventListener("click", onCaptureClick);
-  $("btn-reset-box").addEventListener("click", centreBox);
-  await loadModelBadge();
-  await loadObjects();
-  await startCamera();
-  render(sm.snapshot());
+  try {
+    await enter();
+    wireExit();
+    sm.subscribe(render);
+    state.vocab = await fetch("/api/objects/vocab").then((r) => r.json());
+    buildConditionSelects();
+    wireObjectList();
+    wireNewObject();
+    wireObjectMeta();
+    wireBoxEditor();
+    wireUpload();
+    wireInspectActions();
+    wireKeys();
+    $("btn-capture").addEventListener("click", onCaptureClick);
+    $("btn-reset-box").addEventListener("click", centreBox);
+    await loadModelBadge();
+    await loadObjects();
+    await startCamera();
+    render(sm.snapshot());
+  } catch (err) {
+    // A failure anywhere in init leaves a visible banner, never a silent dead UI.
+    showFatal((err && (err.message || String(err))) || "initialisation failed");
+    throw err;
+  }
 }
 
 main();

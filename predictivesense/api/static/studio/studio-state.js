@@ -13,6 +13,13 @@
  *
  * Transitions: select, capture, review, back_to_camera, save_and_return, discard.
  * One owner of the state; the DOM is a pure function of (state, context).
+ *
+ * Phase 6: `save_and_return` is reachable from every state (including a clean
+ * `browsing` return - Phase 5 omitted it and `dispatch` threw an uncaught error
+ * from `browsing`, which the async click handler swallowed and the "Save and
+ * return" button went dead). A refused transition is recorded in
+ * `lastRefused` and surfaced (Diagnostics readout + a visible note) rather than
+ * failing silently.
  */
 "use strict";
 
@@ -38,7 +45,7 @@ function freshContext() {
 
 // from-state -> allowed transitions
 const TABLE = {
-  browsing: { select: "object_selected" },
+  browsing: { select: "object_selected", save_and_return: "browsing" },
   object_selected: {
     select: "object_selected",
     capture: "capturing",
@@ -65,6 +72,10 @@ const TABLE = {
 export function createStudioState() {
   let state = "browsing";
   let ctx = freshContext();
+  // The last transition the UI asked for and could not have (missing from the
+  // table, or blocked by `hasPending`). Observable in the Diagnostics readout;
+  // cleared by the next successful transition, so it can never latch.
+  let lastRefused = null;
   const listeners = new Set();
 
   function notify() {
@@ -78,7 +89,7 @@ export function createStudioState() {
   }
 
   function snapshot() {
-    return { state, context: { ...ctx } };
+    return { state, context: { ...ctx }, lastRefused };
   }
 
   /** Anything unsaved that a navigation-away would discard (BLOCK 3.19). */
@@ -92,6 +103,14 @@ export function createStudioState() {
     return true;
   }
 
+  /** Record a transition the UI asked for but could not have. Does not throw;
+   *  the caller is expected to show the user why (BLOCK 5.13 / 14). */
+  function refuse(transition) {
+    lastRefused = transition;
+    notify();
+    return { ...snapshot(), blocked: true };
+  }
+
   function dispatch(transition, payload = {}) {
     const target = (TABLE[state] || {})[transition];
     if (target === undefined) {
@@ -99,6 +118,8 @@ export function createStudioState() {
     }
     if (transition === "save_and_return" && hasPending()) {
       // caller must resolve the pending work (or force via discard) first
+      lastRefused = transition;
+      notify();
       return { ...snapshot(), blocked: "pending" };
     }
 
@@ -141,6 +162,7 @@ export function createStudioState() {
         break;
     }
     state = target;
+    lastRefused = null; // a successful transition clears any prior refusal
     notify();
     return snapshot();
   }
@@ -159,9 +181,13 @@ export function createStudioState() {
     get context() {
       return { ...ctx };
     },
+    get lastRefused() {
+      return lastRefused;
+    },
     snapshot,
     can,
     dispatch,
+    refuse,
     hasPending,
     setPending,
     subscribe(fn) {

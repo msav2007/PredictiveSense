@@ -534,3 +534,60 @@ state, risk, or voice; no training or fine-tuning.
   `/ws/ingest` with a real capture clock, `frame_age_ms` from `/ws/state`, plus
   CPU% / RSS. Run in a clean subprocess so cumulative in-process ORT-session
   contention (which skews the legacy thread sweep) does not skew it.
+
+## Phase 6
+
+- **2026-09-09** Object row selection in the Studio is a **single delegated
+  `click` listener on the stable `#object-list` container**, not a per-row
+  handler. Root cause of the reported "clicking Watch does nothing": rows were
+  built with `el("li", { onClick })` and `el()`'s generic `on*` branch registers
+  `addEventListener(k.slice(2), v)` -> `addEventListener("Click", …)` - a
+  case-sensitivity bug, the real `click` never fires - and `loadObjects()` also
+  replaces the rows on every refresh. Delegation fixes both. `el()` itself is
+  left unchanged: `studio.js` was the only caller passing `onClick`, and every
+  other call site (`actionButton`, `label.js`) binds `click` directly.
+- **2026-09-09** `studio-state.js` `TABLE.browsing` gains
+  `save_and_return: "browsing"` - the transition is now reachable from **every**
+  state. Root cause of the dead "Save and return" button: `browsing` had no
+  entry, `dispatch("save_and_return")` threw, and the `async` click handler
+  swallowed it as an unhandled rejection so `leave()` + navigation never ran.
+  `saveAndReturn()` also guards with `sm.can()` + `try/catch` (belt-and-braces);
+  the single `window.location.href` navigation is unconditional once any pending
+  capture is confirmed/discarded. Python mirror in
+  `test_studio_state_machine.py` updated to match.
+- **2026-09-09** Additive Studio robustness (no API, no contract change):
+  `showFatal()` + a `#studio-error` banner surface a module-load fault /
+  unhandled rejection instead of a silent dead UI (BLOCK 14); `refuseNote()`
+  writes a visible note on any refused/blocked transition (BLOCK 5.13); a
+  `#studio-diag` readout shows `{state, selected_object_id, has_pending,
+  last_refused_transition}` (BLOCK 13). `studio-state.js` gains `lastRefused`
+  (exposed in `snapshot()`, set by `refuse()`, cleared by the next successful
+  `dispatch` - it cannot latch). `render()` re-centres the box whenever the stage
+  returns to `camera`, so a capture never inherits an inspected sample's box
+  (BLOCK 5.11).
+- **2026-09-09** **Playwright** added to `[dev]` (`playwright==1.62.0`) - the one
+  new dependency this phase. Base package only; fixtures are hand-rolled (no
+  `pytest-playwright`). New `browser` pytest marker; `tests/browser/*` skip
+  cleanly when Playwright or its Chromium binary is absent. Camera-dependent
+  steps use Chromium's fake media device.
+- **2026-09-09** **One canonical latency protocol** (BLOCK 8.22).
+  **Protocol A** - isolated, in-process, warm: one `PerceptionEngine`
+  (`warmup=True`), a single ORT detector+pose session pair, frames decoded at
+  native resolution, `intra_op_threads=6`, `provider=cpu`, pose every frame,
+  first 5 frames discarded, timing read from `PerceptionResult.detector_ms` /
+  `.pose_ms`. **Protocol B** - end-to-end app loopback: the real app +
+  browser-ingest + perception + policy in a clean subprocess, `frame_age_ms`
+  from `/ws/state`. Phase 2's `detector p50 46.8 ms` came from
+  `benchmark_providers.py`, which runs the **detector and pose in separate
+  passes** (no per-frame interleaving) - it is not Protocol A and under-reports
+  the contended cost. Phase 5's `65-72 ms` is Protocol A. Both earlier reports
+  now carry a one-line pointer to this definition;
+  `scripts/benchmark_recognition_paths.py` re-reports the number.
+- **2026-09-09** Pose gating (`perception.pose_requires_person`) and detector
+  `input_size` **defaults unchanged**. Pose gating: no change justified - a
+  person is present in essentially every frame of the one available clip, so
+  gating never skips pose there. Detector input size: 480 vs 640 measured (see
+  `results/recognition_paths.md` and the phase 6 report); a flip to 480 is
+  plausible on latency with no primary-tier detection loss on this clip, but is
+  left for the developer to confirm on representative footage before changing the
+  default.

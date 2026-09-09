@@ -85,6 +85,14 @@ def test_capture_stores_full_res_original_and_a_separate_thumbnail(client) -> No
     tdec = cv2.imdecode(np.frombuffer(thumb, np.uint8), cv2.IMREAD_COLOR)
     assert max(tdec.shape[:2]) <= client.app.state.config.objects.thumbnail_px
 
+    # BLOCK 6.15.5: the stored original's decoded dimensions EQUAL the recorded
+    # achieved resolution string, and are strictly larger than the thumbnail's -
+    # the original is never the thumbnail standing in for it.
+    ares = tuple(int(v) for v in s["achieved_resolution"].split("x"))
+    assert (dec.shape[1], dec.shape[0]) == ares
+    assert dec.shape[1] > tdec.shape[1] and dec.shape[0] > tdec.shape[0]
+    assert (dec.shape[1], dec.shape[0]) != (tdec.shape[1], tdec.shape[0])
+
 
 def test_jpeg_upload_is_stored_without_recompression(client) -> None:
     oid = client.post("/api/objects", json={"name": "lamp"}).json()["object_id"]

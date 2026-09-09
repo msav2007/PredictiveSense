@@ -47,6 +47,16 @@ guard test `test_no_outbound_network.py` (scans `predictivesense/`, never
 ### Perception latency - `scripts/benchmark_providers.py` (150 frames of the
 developer's 1920×1080 clip, warm)
 
+> **Latency protocol note (added Phase 6).** These figures come from
+> `benchmark_providers.py`, which times the **detector and pose in separate
+> passes** with no per-frame interleaving. That is *not* the canonical
+> **Protocol A** defined in `docs/decisions.md` (Phase 6) - Protocol A runs both
+> ORT sessions per frame, as the analysis loop does, and measures ~2× higher
+> detector p50 on the developer's footage. The `detector p50 46.75 ms` below is
+> a lower bound (isolated single-model), not the in-loop cost. See
+> `docs/phase-reports/phase6.md` and `results/recognition_paths.md` for the
+> reconciled numbers.
+
 **CPU** (`results/providers_cpu.json`, shipped `intra_op_threads: 6`):
 
 | model | warm-up ms | p50 ms | p95 ms | max ms | throughput fps | peak process RSS MB |

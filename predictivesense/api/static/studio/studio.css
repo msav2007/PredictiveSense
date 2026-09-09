@@ -2,10 +2,31 @@
 
 .studio {
   display: grid;
-  grid-template-rows: var(--topbar-h) 1fr;
+  grid-template-rows: var(--topbar-h) auto 1fr;
   min-height: 100vh;
   background: var(--bg);
   color: var(--ink);
+}
+
+/* BLOCK 14: fatal-error banner - visible, never silent. */
+.studio-error-banner {
+  padding: 8px 16px;
+  background: var(--bad, #b23);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* BLOCK 13: Diagnostics-visible Studio state readout. */
+.studio-diag {
+  padding: 3px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow-x: auto;
 }
 
 .studio-topbar {

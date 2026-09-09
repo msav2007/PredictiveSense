@@ -30,6 +30,12 @@ dependencies = [
 dev = [
     "pytest==8.3.4",
     "httpx==0.28.1",
+    # Phase 6: browser smoke tests for the Object Learning Studio. The ONLY new
+    # dependency this phase (two consecutive phases shipped frontend defects the
+    # suite reported as fixed). `browser`-marked tests skip cleanly when the
+    # package or its Chromium binary is absent - see tests/browser/conftest.py.
+    # Base package only; the fixtures are hand-rolled (no pytest-playwright).
+    "playwright==1.62.0",
 ]
 # Windows-only: human-readable DirectShow camera names for backend enumeration.
 # Never imported at import time; a missing or throwing pygrabber degrades to
@@ -56,4 +62,5 @@ markers = [
     "hardware: requires a physical camera; skipped unless --run-hardware is passed",
     "models: requires ONNX weights under models/; skips cleanly when they are absent",
     "dataset: requires the labelled evaluation set under data/eval/; skips cleanly when it is absent",
+    "browser: drives the real app in headless Chromium via Playwright; skips cleanly when Playwright or its browser binary is absent",
 ]

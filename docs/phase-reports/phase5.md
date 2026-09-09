@@ -117,6 +117,15 @@ detections** (the pipeline does not hallucinate objects on noise); reconciles.
 `python scripts/benchmark_latency.py --source data/raw --limit 150 --end-to-end-seconds 14`
 -> `results/latency_2_5.{json,md}`.
 
+> **Latency protocol note (added Phase 6).** The per-frame CPU inference figures
+> in this section (detector p50 ~65-72 ms, pose ~52-57 ms, combined ~129 ms) are
+> the canonical **Protocol A** (isolated, in-process, warm, both ORT sessions
+> per frame; defined in `docs/decisions.md`, Phase 6). They are consistent with
+> Phase 6's re-run on the same footage; the Phase 2 `46.8 ms` figure is a
+> different, non-interleaved measurement and is annotated as such in
+> `phase2.md`. See `docs/phase-reports/phase6.md` for the single reconciled
+> protocol.
+
 **End-to-end capture -> snapshot loopback** (the real FastAPI app + browser-ingest
 source + perception + policy, frames pushed over `/ws/ingest` with a real capture
 clock, `StateSnapshot.frame_age_ms` collected from `/ws/state`; run in a clean

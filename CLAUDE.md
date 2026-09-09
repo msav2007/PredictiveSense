@@ -79,7 +79,7 @@ files losslessly.
   - `groups/` - `constants.js` (`GROUP_ORDER`; `RESERVED_GROUP_IDS = ["alerts"]` after Phase 2 filled `analysis` and Phase 2.5 filled `research`), then one module per panel section: `input`, `camera`, `video`, `dataset`, `analysis` (Phase 2), `research` (**Phase 2.5** - links to `/label`, live labelling progress, latest eval summary), `diagnostics`. Each exports `id,title,order,modes,view,summary,render,update?`.
   - `features/` - logic moved out of `app.js` essentially verbatim: `runtime.js` (shared capture state + event bus), `camera-capture.js`, `analysis-client.js` (owns the Worker), `recording.js`, `videos.js`, `metrics.js`. Phase 2: `detection.js` + `pose.js` (analysis sub-modules via `registerAnalysisModule`), `overlay.js` (draws boxes/skeletons on `#overlay-layer`; never touches `<video>`; dashed+dimmed for the low-confidence band; `STALE` label when stale; no track IDs), `analysis-prefs.js` (per-viewer overlay-layer toggles, init from config, persisted). Phase 2.5: `policy.js` (per-viewer policy-view toggles - policy/domain/margin - re-derived from the additive `Detection` fields, **no API route**; `activeThresholds()` read-only); `overlay.js` renders `unknown` dashed/muted/`Unknown` keeping the box; `detection.js` gains the policy controls; `diagnostics.js` gains per-rule rejection counters + raw->decided list.
   - `label/` - **Phase 2.5** standalone labelling tool (`index.html` + `label.js`), served at `/label`, not part of the shell: canvas box editor (draw/move/resize/relabel/delete), class palette with keyboard shortcuts, next/prev, seed-from-detector, saves to `POST /api/labels/frame/{id}`.
-  - `studio/` - **Phase 4** standalone Object Learning Studio (`index.html` + `studio.js` + `studio.css`), served at `/studio`, **not** part of the shell. On load `POST /api/studio/enter` (stops monitoring); on exit `POST /api/studio/leave` (+ a `pagehide` `sendBeacon` backstop). Object CRUD sidebar, camera preview (`<video>.srcObject` only, no worker) with a drag/resize box editor (4 corner handles + arrow-key nudge), file upload (staged one at a time, box adjusted before save), fixed condition-tag selects (defaults remembered in `localStorage`), positive/negative/hard-negative role, `confusable_with` hard-negative prompt, review strip with an inspector (retag / re-box / soft-discard), coverage guidance panel, read-only active-model badge.
+  - `studio/` - **Phase 4** standalone Object Learning Studio (`index.html` + `studio.js` + `studio.css`), served at `/studio`, **not** part of the shell. On load `POST /api/studio/enter` (stops monitoring); on exit `POST /api/studio/leave` (+ a `pagehide` `sendBeacon` backstop). Object CRUD sidebar, camera preview (`<video>.srcObject` only, no worker) with a drag/resize box editor (4 corner handles + arrow-key nudge), file upload (staged one at a time, box adjusted before save), fixed condition-tag selects (defaults remembered in `localStorage`), positive/negative/hard-negative role, `confusable_with` hard-negative prompt, review strip with an inspector (retag / re-box / soft-discard), coverage guidance panel, read-only active-model badge. **Phase 5** `studio-state.js` state machine (`browsing|object_selected|capturing|reviewing`); `studio.js` a pure render of it. **Phase 6** the object list is selected by ONE delegated `click` listener on the stable `#object-list` container (`wireObjectList()`) - never a per-row handler; `save_and_return` is reachable from `browsing` (was a dead button); `showFatal()` + `#studio-error` banner surface a module-load fault; `refuseNote()` gives visible feedback on a refused transition; `#studio-diag` shows `{state, selected_object_id, has_pending, last_refused_transition}`; the box re-centres on returning to the camera stage. Browser-verified by `tests/browser/`.
   - `ui/resizer.js` - **Phase 4** operations-panel drag handle: pure `clampPanelWidth(width, winWidth, cfg)` (min `ui.panel.min_width_px`; max min(`max_width_px`, `max_width_frac` * window); viewport kept >= 45%), a `requestAnimationFrame`-throttled pointer drag batching one read + one write of `--panel-w` on `.app-shell`, keyboard (`role="separator"`, arrows step 16 px, `Home` / double-click reset), width persisted as `store.panelWidth`. Mounted by `shell.js`.
   - `analysis-worker.js` - **unchanged** (newest-wins + `bufferedAmount` backpressure + `VideoFrame` close audit; `capture.max_ws_buffered_bytes`).
   - Input mode (`Real-time` / `Recorded video`) is **client-side view state** (`store`, persisted) - it does not touch the server `mode` config; recorded analysis still runs via `POST /api/analyze`, and the recorded-mode viewport plays a locally chosen file (no endpoint). Every engineering metric lives in the Diagnostics group (hidden until the top-bar toggle; raw keys shown next to renamed labels). `POST /api/metrics/browser` + the Browser-measurement block are in Diagnostics.
@@ -95,6 +95,7 @@ files losslessly.
 - `scripts/eval_detection.py` - **Phase 2.5** `--split val|test --model yolo11n|yolox_tiny --policy on|off`: greedy-IoU harness -> `results/eval_<model>_<policy>_<split>.{json,md}`. Refuses empty/partial split; logs every `test` opening to `results/test_set_openings.md` and refuses a 2nd without `--allow-reopen`.
 - `scripts/policy_effect.py` - **Phase 2.5** mechanical policy effect on unlabelled frames (counts, not accuracy) -> `results/policy_effect_unlabelled_<model>.{json,md}`.
 - `scripts/benchmark_latency.py` - **Phase 2.5** pose-gating / intra-op thread sweep / policy cost (<1ms p95) over `data/raw/` -> `results/latency_2_5.{json,md}`.
+- `scripts/benchmark_recognition_paths.py` - **Phase 6** the three BLOCK 8 experiments under one canonical latency protocol (Protocol A isolated in-process / Protocol B end-to-end app loopback, both documented in `docs/decisions.md`): pose gating false vs true, detector input size 480 vs 640 (latency + primary-tier detection counts), and a reconciliation of the Phase 2 vs Phase 5 detector figures -> `results/recognition_paths.{json,md}`. **Latency and frequencies, not accuracy.** No config default changed.
 - `scripts/_eval_common.py` - shared model registry + split-completeness checks for the eval scripts (needs `cv2.imread`, hence in `scripts/`, not the package).
 - `scripts/benchmark_providers.py` - `--provider cpu|dml`: both models over a fixed clip -> warm-up / p50 / p95 / max / throughput / peak RSS + agreement check vs the CPU baseline -> `results/providers_<provider>.{json,md}`. DirectML runs from a separate `.venv-dml`.
 - `scripts/class_coverage_audit.py` - `--source <clip-or-dir>`: detector over the developer's footage -> per required class: frames-with-detection, rate, conf p10/p50/p90, median box-area fraction, multi-count frames; top unexpected classes; a developer verdict column -> `results/class_coverage.{json,md}`. **Frequencies, not accuracy** - there are no labels.
@@ -174,6 +175,12 @@ pytest -q tests\unit\test_object_registry.py tests\unit\test_object_quality.py t
 pytest -q tests\integration\test_objects_api.py tests\integration\test_studio_lifecycle.py
 python scripts\export_objects_coco.py --out data\objects\coco_train.json   # after the developer collects samples
 
+# --- Phase 6 Studio repair (browser-verified) & recognition responsiveness ---
+pip install -e ".[dev]"                                         # now pulls Playwright
+python -m playwright install chromium                           # once
+pytest -q -m browser                                            # tests/browser/*; skips cleanly if Playwright/Chromium absent
+python scripts\benchmark_recognition_paths.py --source data\raw --frames 300   # pose gating + input size, one protocol -> results\recognition_paths.{json,md}
+
 # regenerate the lock file (UTF-8, no BOM; Windows PowerShell 5.1 has no utf8NoBOM):
 $f = & .\.venv\Scripts\python.exe -m pip freeze --exclude-editable
 [IO.File]::WriteAllText("$PWD\requirements.lock.txt", ($f -join "`n") + "`n", (New-Object Text.UTF8Encoding($false)))
@@ -232,8 +239,31 @@ $f = & .\.venv\Scripts\python.exe -m pip freeze --exclude-editable
 
 ## Phase discipline
 
-Current phase: **Phase 5 (Recognition Trust & Studio Repair) COMPLETE** - see
-`PredictiveSense-P5-Prompt.md`. Fixes what was wrong: (1) the recognition policy
+Current phase: **Phase 6 (Studio Repair, Browser-Verified & Recognition
+Responsiveness) COMPLETE** - see `PredictiveSense-P6-Prompt.md`. The Object
+Learning Studio is now reachable and usable in a browser, proven by a Playwright
+suite that loads the real page and clicks. Two root causes, both reproduced in
+the browser first: (1) object row clicks were dead - rows built with
+`el("li", { onClick })` and `el()`'s `on*` branch registers
+`addEventListener("Click")` (case-sensitive; never fires); fixed by ONE delegated
+`click` listener on the stable `#object-list` container; (2) "Save and return"
+was dead - `studio-state.js` `TABLE.browsing` had no `save_and_return`, so
+`dispatch` threw and the `async` click handler swallowed it; fixed by adding the
+transition (now reachable from every state) + a `can()`/`try` guard so
+navigation is never trapped. Additive: `showFatal()` + `#studio-error` banner
+(module-load faults visible, not silent), `refuseNote()` (refused transitions
+show feedback), `#studio-diag` readout `{state, selected_object_id, has_pending,
+last_refused_transition}`, box re-centred on returning to camera. New `browser`
+pytest marker + `tests/browser/*` (Playwright, the one new `[dev]` dependency;
+Chromium fake media device; skips cleanly when absent). Recognition
+responsiveness: `scripts/benchmark_recognition_paths.py` ran the three bounded
+BLOCK 8 experiments under one canonical latency protocol (Protocol A isolated /
+Protocol B end-to-end; Phase 2 vs Phase 5 detector figures reconciled) - **no
+config default changed**, pose gating "no change justified", input size flip left
+to the developer. **No model trained; no model swap / quantisation / threading
+redesign.**
+
+Phase 5 (still stands): fixed (1) the recognition policy
 whitelist that rejected valid baseline classes -> replaced by a three-tier class
 vocabulary (`primary`/`secondary`/`implausible`), a total disjoint partition of
 COCO-80 validated at load; `primary` + `secondary` both shown, only
@@ -257,9 +287,54 @@ confidence value as accuracy, a detection frequency as P/R, a stored image as a
 trained model, a coverage/quality heuristic as a validated metric, or a tier
 assignment as a measured result. Never fit a threshold on `test` or open `test`
 more than once. Never claim a performance number not produced by a command run on
-this machine, or a physical check not performed. **Do not start Phase 6.**
+this machine, or a physical check not performed. **Do not start Phase 7 (Scene
+Snapshot Studio).**
 
 ## Current phase status
+
+Phase 6 complete. `pytest -q`: **340 passed, 2 skipped** (baseline end of Phase
+5: 321 passed / 2 skipped; +19 = 6 non-browser + 13 browser, 0 regressions).
+`pytest -q -m browser` = **13 passed** (Playwright + Chromium fake media device;
+skips cleanly when either is absent). `pytest -q -m "not browser"` = 327 passed /
+2 skipped. `pytest -q -m models` = **12 passed** (unchanged - no inference code
+touched); `pytest -q -m dataset` = 1 skipped cleanly. See
+`docs/phase-reports/phase6.md` (three-part format), `docs/architecture.md`
+"Phase 6", `docs/decisions.md` "Phase 6".
+
+Phase 6 summary: both reported Studio failures reproduced in a real browser
+first, then root-caused. (1) Object row clicks dead - `el("li", { onClick })`
+registers `addEventListener("Click")` (case-sensitive; never fires) on nodes
+`loadObjects()` replaces every refresh -> replaced by ONE delegated `click`
+listener on the stable `#object-list` container (`wireObjectList()`). (2) "Save
+and return" dead - `studio-state.js` `TABLE.browsing` had no `save_and_return`,
+so `dispatch` threw and the `async` click handler swallowed it -> added
+`save_and_return: "browsing"` (reachable from every state) + a `can()`/`try`
+guard so navigation is never trapped. Additive: `showFatal()` + `#studio-error`
+banner (BLOCK 14), `refuseNote()` (visible feedback on any refused transition,
+BLOCK 5.13), `#studio-diag` readout `{state, selected_object_id, has_pending,
+last_refused_transition}` (BLOCK 13), `studio-state.js` `lastRefused` +
+`refuse()` (cleared by the next good `dispatch`, cannot latch), `render()`
+re-centres the box on return to the camera stage (BLOCK 5.11). New: `browser`
+pytest marker, `tests/browser/{conftest,test_studio_flow,test_main_page}.py`
+(uvicorn in a thread, seeded temp objects store, Chromium fake media device,
+console-error assertions), `scripts/benchmark_recognition_paths.py`.
+`test_studio_state_machine.py` mirror + regression/static tests per root cause;
+`test_studio_capture_quality.py` extended (decoded dims == achieved != thumb).
+`playwright==1.62.0` added to `[dev]` (the one new dependency; base package
+only). **Measured (this machine):** browser suite 13/13; fake-camera capture
+stores a 1920x1920 original (`capture_path: imagebitmap`) with a separate
+<=240 px thumbnail. Recognition experiments (`results/recognition_paths.md`, one
+`data/raw` clip, 300 frames): canonical latency protocol defined (Protocol A
+isolated-interleaved / Protocol B end-to-end loopback); Phase 2's 46.8 ms is
+`benchmark_providers.py` timing models in **separate passes** (not Protocol A) -
+Protocol A on this machine is ~93-113 ms detector p50, load-dependent, and that
+distinction reconciles Phase 2 vs Phase 5. Pose gating: **no change justified**
+(person in 295/295 frames). Input size 480 vs 640: 480 halves detector p50 with
+0 primary-tier detection loss on this clip, but the default is **unchanged** -
+left to the developer to confirm on representative footage. `config/profiles/*`
+untouched.
+
+### Pre-Phase-6 status (historical)
 
 Phase 5 complete. `pytest -q`: **321 passed, 2 skipped** (1 hardware
 `--run-hardware`; 1 `dataset` - skips cleanly until the eval set is labelled).

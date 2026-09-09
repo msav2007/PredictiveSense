@@ -27,7 +27,7 @@ _STUDIO = Path(predictivesense.__file__).resolve().parent / "api" / "static" / "
 # --------------------------------------------------------------------------
 
 _TABLE = {
-    "browsing": {"select": "object_selected"},
+    "browsing": {"select": "object_selected", "save_and_return": "browsing"},
     "object_selected": {
         "select": "object_selected",
         "capture": "capturing",
@@ -66,6 +66,7 @@ class StudioState:
     def __init__(self) -> None:
         self.state = "browsing"
         self.ctx = _fresh()
+        self.last_refused = None  # observable; cleared by the next good transition
 
     def has_pending(self) -> bool:
         return self.ctx["pendingUploads"] > 0 or self.ctx["dirtyInspect"]
@@ -76,6 +77,9 @@ class StudioState:
         if t == "save_and_return":
             return not self.has_pending()
         return True
+
+    def refuse(self, t: str) -> None:
+        self.last_refused = t
 
     def set_pending(self, uploads=None, dirty_inspect=None) -> None:
         if uploads is not None:
@@ -88,6 +92,7 @@ class StudioState:
         if target is None:
             raise ValueError(f"invalid transition {t} from {self.state}")
         if t == "save_and_return" and self.has_pending():
+            self.last_refused = t
             return "blocked"
         if t == "select":
             self.ctx = _fresh()
@@ -109,6 +114,7 @@ class StudioState:
         elif t == "save_and_return":
             self.ctx = _fresh()
         self.state = target
+        self.last_refused = None
         return self.state
 
 
@@ -198,6 +204,53 @@ def test_dirty_inspect_also_blocks_leaving() -> None:
     assert sm.can("save_and_return") is True
 
 
+# -- Phase 6 REGRESSION: root cause #2 - "Save and return" dead from `browsing` -
+# Phase 5 had no `save_and_return` entry for `browsing`; `dispatch()` threw an
+# uncaught error that the async click handler swallowed, so the button no-op'd on
+# every clean return (and on the reported bug, where selection never fired so the
+# machine was stuck in `browsing`).
+
+
+def test_save_and_return_is_reachable_from_browsing() -> None:
+    sm = StudioState()
+    assert sm.state == "browsing"
+    assert sm.can("save_and_return") is True  # not pending -> allowed
+    result = sm.dispatch("save_and_return")  # must NOT raise
+    assert result == "browsing"
+    assert sm.ctx["objectId"] is None
+
+
+def test_save_and_return_reachable_from_every_state() -> None:
+    # object_selected
+    sm = StudioState()
+    sm.dispatch("select", objectId="a")
+    assert sm.can("save_and_return") and sm.dispatch("save_and_return") == "browsing"
+    # capturing (after the staged upload is resolved)
+    sm = StudioState()
+    sm.dispatch("select", objectId="b")
+    sm.dispatch("capture", count=1)
+    sm.set_pending(uploads=0)
+    assert sm.dispatch("save_and_return") == "browsing"
+    # reviewing (after the inspect edit is saved)
+    sm = StudioState()
+    sm.dispatch("select", objectId="c")
+    sm.dispatch("review", sampleId="s1")
+    assert sm.dispatch("save_and_return") == "browsing"
+
+
+def test_last_refused_is_recorded_then_cleared_by_the_next_good_transition() -> None:
+    sm = StudioState()
+    sm.dispatch("select", objectId="lamp")
+    sm.dispatch("capture", count=1)  # pending
+    assert sm.dispatch("save_and_return") == "blocked"
+    assert sm.last_refused == "save_and_return"  # observable in Diagnostics
+    sm.refuse("back_to_camera")
+    assert sm.last_refused == "back_to_camera"
+    sm.set_pending(uploads=0)
+    sm.dispatch("back_to_camera")
+    assert sm.last_refused is None  # cannot latch
+
+
 # --------------------------------------------------------------------------
 # the shipped JS actually uses the machine and never reloads
 # --------------------------------------------------------------------------
@@ -231,3 +284,63 @@ def test_python_mirror_matches_the_shipped_transition_table() -> None:
         assert re.search(rf"\b{from_state}:\s*\{{", block), f"{from_state} missing in JS TABLE"
         for t, to in trans.items():
             assert re.search(rf"\b{t}:\s*\"{to}\"", block), f"{from_state}.{t} -> {to} missing in JS"
+
+
+# -- Phase 6 REGRESSION: root cause #1 - object row clicks were bound with a
+# case-wrong `el("li", { onClick })` (-> addEventListener("Click"), never fires)
+# on nodes that `loadObjects()` replaces on every refresh. The fix is ONE
+# delegated listener on the stable #object-list container.
+
+
+def test_object_rows_are_selected_by_delegation_from_a_stable_container() -> None:
+    js = (_STUDIO / "studio.js").read_text(encoding="utf-8")
+    html = (_STUDIO / "index.html").read_text(encoding="utf-8")
+
+    # the stable container exists and is never itself replaced
+    assert 'id="object-list"' in html
+
+    # one delegated click listener bound to that container, matching rows by class
+    assert re.search(r'"object-list"\)\.addEventListener\("click"', js), (
+        "object selection must be delegated from #object-list, not bound per row"
+    )
+    assert 'closest(".object-item")' in js
+
+    # the per-row `el(...)` must NOT carry an inline handler (the Phase 5 bug)
+    assert "onClick:" not in js and "onclick:" not in js, (
+        "object rows must not use an inline el() click handler"
+    )
+    # rows still tag their id for the delegated handler to read
+    assert "dataset: { objectId:" in js
+
+
+def test_studio_surfaces_load_errors_and_exposes_a_state_readout() -> None:
+    js = (_STUDIO / "studio.js").read_text(encoding="utf-8")
+    html = (_STUDIO / "index.html").read_text(encoding="utf-8")
+
+    # BLOCK 14: a module-load fault / unhandled rejection shows a visible banner
+    assert 'id="studio-error"' in html
+    assert "showFatal" in js
+    assert 'addEventListener("error"' in js
+    assert 'addEventListener("unhandledrejection"' in js
+    assert "catch" in js and "showFatal(" in js  # main() is wrapped
+
+    # BLOCK 13: Diagnostics-visible state readout, all four fields
+    assert 'id="studio-diag"' in html
+    for field in (
+        "state=",
+        "selected_object_id=",
+        "has_pending=",
+        "last_refused_transition=",
+    ):
+        assert field in js, f"studio-diag readout missing {field!r}"
+    # BLOCK 5.13: a refused transition produces visible feedback
+    assert "refuseNote" in js
+
+
+def test_studio_state_exposes_last_refused_and_clears_it() -> None:
+    sjs = (_STUDIO / "studio-state.js").read_text(encoding="utf-8")
+    assert "lastRefused" in sjs
+    assert "refuse" in sjs
+    # snapshot carries it; a successful dispatch resets it
+    assert re.search(r"return \{ state, context: \{ \.\.\.ctx \}, lastRefused \}", sjs)
+    assert "lastRefused = null" in sjs
