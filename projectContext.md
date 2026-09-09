@@ -1,4 +1,4 @@
-# PredictiveSense - project context for Claude Code
+# PredictiveSense - project context
 
 ## What this project is
 
