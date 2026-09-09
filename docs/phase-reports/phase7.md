@@ -209,9 +209,9 @@ real one is used.
 - Total: **374 passed, 2 skipped** (baseline 340 / 2).
 - `pytest -q -m models`: **13 passed** (12 unchanged + 1 new bulk-upload
   proposal test).
-- New files: `tests/unit/test_batch_store.py` (8), `tests/unit/test_box_proposal.py`
+- New files: `tests/unit/test_batch_store.py` (7), `tests/unit/test_box_proposal.py`
   (8), `tests/integration/test_object_batches_api.py` (13, one `models`),
-  `tests/browser/test_studio_bulk_upload.py` (7).
+  `tests/browser/test_studio_bulk_upload.py` (6). 7 + 8 + 13 = 28 non-browser.
 - `python scripts/export_objects_coco.py --out data/objects/coco_train.json`
   exits 2 ("no object profiles to export") because `data/objects/` is still
   empty on this machine - unchanged pre-existing behaviour; the staging-exclusion

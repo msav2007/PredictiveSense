@@ -185,7 +185,11 @@ function needsBox(it) {
 
 function gridSignature() {
   return b.items
-    .map((it) => `${it.item_id}:${it.status}:${it.box_confirmed_by_human ? 1 : 0}:${(it.quality?.flags || []).join(",")}`)
+    .map(
+      (it) =>
+        `${it.item_id}:${it.status}:${it.box_confirmed_by_human ? 1 : 0}:` +
+        `${(it.box || []).map((n) => Math.round(n)).join(",")}:${(it.quality?.flags || []).join(",")}`,
+    )
     .join("|");
 }
 
@@ -208,8 +212,24 @@ function renderGrid() {
         alt: it.filename,
         src: `/api/objects/${oid}/batches/${b.batchId}/items/${it.item_id}/image?thumb=1`,
       });
+      cell.append(img);
+      // the current box, drawn on the thumbnail (same aspect mapping as the img)
+      if (it.box && it.box.length === 4 && it.width && it.height) {
+        const [bx, by, bw, bh] = it.box;
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("class", "bc-boxlayer");
+        svg.setAttribute("viewBox", `0 0 ${it.width} ${it.height}`);
+        svg.setAttribute("preserveAspectRatio", "xMidYMid slice");
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rect.setAttribute("x", bx);
+        rect.setAttribute("y", by);
+        rect.setAttribute("width", bw);
+        rect.setAttribute("height", bh);
+        svg.append(rect);
+        cell.append(svg);
+      }
       const badge = el("span", { class: "bc-badge", text: badgeText(it) });
-      cell.append(img, badge);
+      cell.append(badge);
       if (it.box_confirmed_by_human) cell.append(el("span", { class: "bc-ok", text: "✓" }));
       const flags = (it.quality && it.quality.flags) || [];
       if (flags.length) cell.append(el("span", { class: "bc-flag", text: flags.join(",") }));
