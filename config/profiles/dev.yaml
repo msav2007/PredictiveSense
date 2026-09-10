@@ -107,13 +107,15 @@ perception:
   # with two sessions + the loop threads: measured combined p50 collapsed to
   # ~440 ms. 6 is the measured knee (~90-110 ms combined). See phase2.md.
   intra_op_threads: 6
-  # Provider chosen from results/providers_cpu.json vs results/providers_dml.json
-  # (docs/phase-reports/phase2.md "Measured", docs/decisions.md). DirectML on the
-  # Arc iGPU AGREES with CPU numerically (class-agreement 1.0, mean |box diff|
-  # 0.0 px) but is ~2.2x SLOWER for these nano models (combined p50 216 ms vs 96 ms) -
-  # the tiny kernels never saturate the GPU while the 14-core CPU does.
-  # Default: cpu.
-  provider: cpu
+  # Phase 8: never hard-coded. "auto" tries cuda -> directml -> cpu and takes the
+  # first available EP, always falling back to CPU and logging which + why. On
+  # this CPU-only machine that resolves to CPU (measured best here: DirectML on
+  # the Arc iGPU agrees numerically but is ~2.2x slower for these nano models -
+  # results/providers_cpu.json vs providers_dml.json). On the NVIDIA laptop the
+  # same config picks CUDA. An explicit `provider: cuda` that is unavailable is a
+  # LOUD failure, not a silent CPU fallback. The EP actually in use is reported
+  # in Diagnostics, the session manifest and every result file.
+  provider: auto
   detector:
     model_path: models/yolo11n.onnx
     input_size: 640            # sweep {320,480,640}: 640 keeps small objects; see report

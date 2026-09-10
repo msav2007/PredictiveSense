@@ -20,20 +20,59 @@ from predictivesense.logging_setup import get_logger
 
 __all__ = [
     "PROVIDER_ALIASES",
+    "AUTO_PREFERENCE_ORDER",
     "SessionHandle",
     "create_session",
     "available_provider_aliases",
+    "resolve_provider",
+    "ProviderUnavailableError",
 ]
 
 _LOG = get_logger(__name__)
 
 # Friendly name (config ``perception.provider``) -> ONNX Runtime EP name.
+# ``directml`` and ``dml`` are the same EP (``dml`` kept for the historical
+# ``.venv-dml`` benchmark path and ``results/providers_dml.json``).
 PROVIDER_ALIASES: dict[str, str] = {
     "cpu": "CPUExecutionProvider",
+    "cuda": "CUDAExecutionProvider",
+    "directml": "DmlExecutionProvider",
     "dml": "DmlExecutionProvider",
     "openvino": "OpenVINOExecutionProvider",
 }
 _CPU_EP = "CPUExecutionProvider"
+
+# ``perception.provider = "auto"`` tries these in order and takes the first whose
+# EP is present in this onnxruntime build; CPU is always the final fallback.
+# Rationale: on an NVIDIA laptop CUDA should win; DirectML is a distant second
+# (measured ~2.2x slower than CPU for these nano models on this machine's Arc
+# iGPU - so ``auto`` only picks it when nothing better exists, and a developer
+# who wants to benchmark it sets ``provider: directml`` explicitly).
+AUTO_PREFERENCE_ORDER: tuple[str, ...] = ("cuda", "directml", "cpu")
+
+_UNAVAILABLE_HINT: dict[str, str] = {
+    "cuda": (
+        "install the CUDA build in a separate environment: "
+        "`pip install -e \".[cuda]\"` (onnxruntime-gpu; needs a matching CUDA + "
+        "cuDNN runtime - see docs/setup.md). onnxruntime, onnxruntime-gpu and "
+        "onnxruntime-directml share the module name and cannot coexist."
+    ),
+    "directml": (
+        "install onnxruntime-directml in a separate environment (never the main "
+        ".venv); see docs/setup.md."
+    ),
+    "dml": "install onnxruntime-directml in a separate environment; see docs/setup.md.",
+    "openvino": "onnxruntime-openvino is optional/deferred; not supported here.",
+}
+
+
+class ProviderUnavailableError(RuntimeError):
+    """An explicitly requested execution provider is absent from this ORT build.
+
+    Never raised for ``auto`` (which falls back to CPU) - only when the config
+    named a specific GPU provider that is not installed. The message is
+    actionable. Silent fallback is how a "GPU result" turns out to have been CPU.
+    """
 
 
 @dataclass(frozen=True)
@@ -49,11 +88,79 @@ class SessionHandle:
     model_path: str
 
 
+def available_execution_providers() -> list[str]:
+    """Raw ONNX Runtime EP names present in this build (keeps ``onnxruntime``
+    imports scoped to ``perception/`` - callers elsewhere use this)."""
+
+    return list(ort.get_available_providers())
+
+
+def onnxruntime_version() -> str:
+    """The installed ``onnxruntime`` version string."""
+
+    return str(getattr(ort, "__version__", "unknown"))
+
+
 def available_provider_aliases() -> list[str]:
-    """Friendly aliases whose EP is present in this onnxruntime build."""
+    """Friendly aliases whose EP is present in this onnxruntime build (one entry
+    per distinct EP - ``dml``/``directml`` collapse to one)."""
 
     present = set(ort.get_available_providers())
-    return [alias for alias, ep in PROVIDER_ALIASES.items() if ep in present]
+    seen: set[str] = set()
+    out: list[str] = []
+    for alias, ep in PROVIDER_ALIASES.items():
+        if ep in present and ep not in seen:
+            out.append(alias)
+            seen.add(ep)
+    return out
+
+
+def resolve_provider(requested: str) -> tuple[str, str]:
+    """Map a config ``perception.provider`` value to a concrete alias.
+
+    Returns ``(alias, reason)``. ``"auto"`` picks the first available provider in
+    :data:`AUTO_PREFERENCE_ORDER`, always ending at CPU, and logs the choice and
+    why. An explicitly named provider whose EP is absent raises
+    :class:`ProviderUnavailableError` with an actionable message - **never** a
+    silent fallback.
+    """
+
+    req = (requested or "auto").lower()
+    present = set(ort.get_available_providers())
+
+    if req == "auto":
+        for alias in AUTO_PREFERENCE_ORDER:
+            if PROVIDER_ALIASES[alias] in present:
+                reason = (
+                    f"provider=auto selected {alias!r} "
+                    f"({PROVIDER_ALIASES[alias]} available); order tried: "
+                    f"{', '.join(AUTO_PREFERENCE_ORDER)}"
+                )
+                _LOG.info("%s", reason)
+                return alias, reason
+        reason = (
+            f"provider=auto fell back to 'cpu' (no GPU EP present; "
+            f"available: {sorted(present)})"
+        )
+        _LOG.info("%s", reason)
+        return "cpu", reason
+
+    if req not in PROVIDER_ALIASES:
+        raise ValueError(
+            f"unknown perception provider {requested!r}; "
+            f"expected one of: auto, cpu, cuda, directml"
+        )
+    ep = PROVIDER_ALIASES[req]
+    if ep not in present:
+        raise ProviderUnavailableError(
+            f"perception.provider={requested!r} was requested explicitly but its "
+            f"execution provider {ep} is not in this onnxruntime build "
+            f"(available: {sorted(present)}). {_UNAVAILABLE_HINT.get(req, '')} "
+            f"Set perception.provider: auto to fall back to CPU automatically."
+        )
+    reason = f"provider={req!r} requested explicitly; {ep} is available"
+    _LOG.info("%s", reason)
+    return req, reason
 
 
 def _fixed_size_from_shape(shape: list[object]) -> int | None:
@@ -89,22 +196,16 @@ def create_session(
             f"perception model not found: {path} - run `python scripts/fetch_models.py`"
         )
 
-    alias = provider.lower()
-    if alias not in PROVIDER_ALIASES:
-        raise ValueError(
-            f"unknown perception provider {provider!r}; known: {sorted(PROVIDER_ALIASES)}"
-        )
+    # ``auto`` -> concrete alias (documented order, CPU fallback, logged);
+    # an explicitly requested but absent GPU provider -> ProviderUnavailableError.
+    alias, _reason = resolve_provider(provider)
     ep = PROVIDER_ALIASES[alias]
-    present = ort.get_available_providers()
-    if ep not in present:
-        raise ValueError(
-            f"provider {alias!r} ({ep}) is not available in this onnxruntime build; "
-            f"available: {present}. Install the matching onnxruntime package in a "
-            f"separate environment (see BLOCK 9 / docs/decisions.md)."
-        )
 
     # Request the chosen EP first, with CPU as a per-op fallback for unsupported
-    # ops only. Whether the chosen EP is really active is verified below.
+    # ops only. Whether the chosen EP is really active is verified below. For
+    # CUDA a bad CUDA/cuDNN pairing typically makes the EP silently absent from
+    # get_providers() below rather than raising - that path is turned into a
+    # clear diagnostic, not a stack trace.
     requested = [ep] if ep == _CPU_EP else [ep, _CPU_EP]
     so = ort.SessionOptions()
     so.log_severity_level = 3  # warnings+; keep provider-init noise down
@@ -121,9 +222,16 @@ def create_session(
 
     active = session.get_providers()
     if ep not in active:
+        extra = ""
+        if alias == "cuda":
+            extra = (
+                " This is usually a CUDA/cuDNN runtime-version mismatch for this "
+                "onnxruntime-gpu build - check the versions in docs/setup.md "
+                "against `nvcc --version` / the installed cuDNN."
+            )
         raise RuntimeError(
             f"requested provider {alias!r} ({ep}) did not initialise; session is "
-            f"running on {active}. Refusing to silently use a different provider."
+            f"running on {active}. Refusing to silently use a different provider.{extra}"
         )
 
     spec = session.get_inputs()[0]

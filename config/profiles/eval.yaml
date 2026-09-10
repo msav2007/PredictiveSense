@@ -71,9 +71,10 @@ perception:
   pose_enabled: true
   pose_every_n: 1
   intra_op_threads: 6        # measured knee on 14C/18T; auto over-subscribes (phase2.md)
-  # cpu: DirectML agrees numerically but is ~2.2x slower for these nano models on
-  # the Arc iGPU (results/providers_cpu.json vs providers_dml.json).
-  provider: cpu
+  # Phase 8: "auto" (cuda -> directml -> cpu, first available, CPU fallback,
+  # logged). Resolves to CPU on this machine; picks CUDA on the NVIDIA laptop
+  # with no config change. Explicit-but-unavailable is a loud failure.
+  provider: auto
   detector:
     model_path: models/yolo11n.onnx
     input_size: 640

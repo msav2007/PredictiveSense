@@ -171,7 +171,11 @@ def _bench_model(name: str, infer, frames: list[Frame], proc: psutil.Process) ->
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Benchmark an ONNX execution provider.")
-    p.add_argument("--provider", choices=("cpu", "dml", "openvino"), required=True)
+    p.add_argument(
+        "--provider",
+        choices=("auto", "cpu", "cuda", "directml", "dml", "openvino"),
+        required=True,
+    )
     p.add_argument("--fixture", default=None, help="clip path (default: data/raw/ or the test fixture)")
     p.add_argument("--frames", type=int, default=150)
     p.add_argument("--profile", default="dev")
@@ -213,14 +217,45 @@ def main(argv: list[str] | None = None) -> int:
     pose_row.pop("_per_frame_dets", None)
     det_row["warmup_ms"] = round(detector.warmup_ms, 1)
     pose_row["warmup_ms"] = round(pose.warmup_ms, 1)
-    det_row["ep_in_use"] = detector.provider
-    pose_row["ep_in_use"] = pose.provider
+    det_row["ep_in_use"] = detector.ep_name
+    pose_row["ep_in_use"] = pose.ep_name
 
     results_dir = Path(args.results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    # Machine fingerprint - so results from two laptops are never conflated
+    # (Phase 8 section 14). GPU utilisation / memory are "where practical": not
+    # captured here (no vendor tool wired); the developer records them on the
+    # NVIDIA machine from `nvidia-smi` alongside this run.
+    import platform as _plat
+
+    try:
+        import onnxruntime as _ort
+
+        _ort_ver = _ort.__version__
+        _ort_eps = list(_ort.get_available_providers())
+    except Exception:  # noqa: BLE001
+        _ort_ver, _ort_eps = "unknown", []
+    machine = {
+        "cpu": _plat.processor() or _plat.machine(),
+        "logical_cores": psutil.cpu_count(logical=True),
+        "ram_gb": round(psutil.virtual_memory().total / 1e9, 1),
+        "os": _plat.platform(),
+        "python": _plat.python_version(),
+        "onnxruntime": _ort_ver,
+        "available_providers": _ort_eps,
+        "intra_op_threads": pcfg.intra_op_threads,
+        "detector_input_size": pcfg.detector.input_size,
+        "requested_provider": args.provider,
+        "active_ep_detector": detector.ep_name,
+        "active_ep_pose": pose.ep_name,
+        "model_detector": det_row.get("model") and Path(str(pcfg.detector.model_path)).name,
+        "gpu_util_percent": None,   # developer records from nvidia-smi on the NVIDIA box
+        "gpu_mem_mb": None,
+    }
+
     agreement = None
-    if args.provider != "cpu":
+    if args.provider not in ("cpu",):
         base_path = results_dir / "providers_cpu.json"
         if base_path.is_file():
             base = json.loads(base_path.read_text(encoding="utf-8"))
@@ -231,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
 
     payload = {
         "provider": args.provider,
+        "machine": machine,
         "fixture": str(fixture),
         "frames": len(frames),
         "frame_size": [frames[0].width, frames[0].height],
@@ -254,11 +290,21 @@ def main(argv: list[str] | None = None) -> int:
 
 def _markdown(p: dict) -> str:
     d, po = p["detector"], p["pose"]
+    mm = p.get("machine", {})
     lines = [
         f"# Execution-provider benchmark - `{p['provider']}`",
         "",
+        f"**Machine:** {mm.get('cpu', '?')} · {mm.get('logical_cores', '?')} cores "
+        f"· {mm.get('ram_gb', '?')} GB · {mm.get('os', '?')} · Python "
+        f"{mm.get('python', '?')} · onnxruntime {mm.get('onnxruntime', '?')} "
+        f"· EPs {mm.get('available_providers', [])} · intra_op "
+        f"{mm.get('intra_op_threads', '?')} · detector input "
+        f"{mm.get('detector_input_size', '?')} · GPU util/mem "
+        f"{mm.get('gpu_util_percent')}/{mm.get('gpu_mem_mb')} "
+        f"(record from nvidia-smi on the NVIDIA box)",
+        "",
         f"Fixture: `{p['fixture']}` · {p['frames']} frames · "
-        f"{p['frame_size'][0]}x{p['frame_size'][1]} · EP in use: "
+        f"{p['frame_size'][0]}x{p['frame_size'][1]} · EP actually in use: "
         f"detector `{d['ep_in_use']}` / pose `{po['ep_in_use']}`",
         "",
         "| model | warm-up ms | p50 ms | p95 ms | max ms | throughput fps | peak RSS MB |",

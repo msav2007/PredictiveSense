@@ -100,6 +100,7 @@ def _run_isolated(engine: PerceptionEngine, policy: RecognitionPolicy, imgs, pri
     det_ms, pose_ms, comb_ms = [], [], []
     pose_ran = pose_person_frames = person_frames = 0
     primary_hits = secondary_hits = other_hits = 0
+    primary_scores: list[float] = []  # Phase 8 §10: score distribution, primary tier
     for i, img in enumerate(imgs):
         fr = Frame(
             frame_id=i,
@@ -126,6 +127,7 @@ def _run_isolated(engine: PerceptionEngine, policy: RecognitionPolicy, imgs, pri
             for d in r.detections:
                 if d.class_name in primary:
                     primary_hits += 1
+                    primary_scores.append(float(d.score))
                 elif d.class_name:
                     secondary_hits += 1
                 else:
@@ -144,6 +146,12 @@ def _run_isolated(engine: PerceptionEngine, policy: RecognitionPolicy, imgs, pri
         "pose_available_on_person_frames": pose_person_frames,
         "primary_tier_detections": primary_hits,
         "non_primary_detections": secondary_hits,
+        # Phase 8 §10: does a latency win quietly lose or weaken detections?
+        "primary_score_p10": round(_pct(primary_scores, 10), 4),
+        "primary_score_p50": round(_pct(primary_scores, 50), 4),
+        "primary_score_p90": round(_pct(primary_scores, 90), 4),
+        "primary_score_mean": round(sum(primary_scores) / len(primary_scores), 4)
+        if primary_scores else -1.0,
     }
 
 
@@ -357,17 +365,19 @@ def _md(o: dict) -> str:
     L += ["", f"**Verdict:** {o['verdicts']['pose_gating']}", ""]
 
     L += [
-        "## Experiment 2 - detector input size 480 vs 640 (BLOCK 8.21)",
+        "## Experiment 2 - detector input size 320 / 480 / 640 (Phase 8 §10)",
         "",
         "| input | detector p50/p95 | combined p50/p95 | implied FPS | primary-tier detections | "
-        "non-primary detections |",
-        "|---|---|---|---|---|---|",
+        "primary score p10/p50/p90 | non-primary detections |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for key, size in (("every_frame_480", 480), ("every_frame_640", 640)):
+    for key, size in (("every_frame_320", 320), ("every_frame_480", 480), ("every_frame_640", 640)):
         r = iso[key]
         L.append(
             f"| {size} | {r['detector_p50']}/{r['detector_p95']} | {r['combined_p50']}/{r['combined_p95']} "
-            f"| {r['implied_fps']} | {r['primary_tier_detections']} | {r['non_primary_detections']} |"
+            f"| {r['implied_fps']} | {r['primary_tier_detections']} "
+            f"| {r.get('primary_score_p10')}/{r.get('primary_score_p50')}/{r.get('primary_score_p90')} "
+            f"| {r['non_primary_detections']} |"
         )
     L += ["", f"**Verdict:** {o['verdicts']['input_size']}", ""]
     return "\n".join(L) + "\n"
@@ -460,6 +470,7 @@ def main(argv=None) -> int:
         ("every_frame_640", False, 640),
         ("gated_640", True, 640),
         ("every_frame_480", False, 480),
+        ("every_frame_320", False, 320),  # Phase 8 §10: full 320/480/640 sweep
     ):
         _LOG.info("isolated run: %s", name)
         eng = _engine(cfg, pose_requires_person=pose_gate, input_size=size)

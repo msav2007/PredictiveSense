@@ -53,12 +53,17 @@ class PerceptionEngine:
         self._pose_reuses = 0
 
         threads = config.intra_op_threads
+        # Resolve the provider ONCE (auto -> concrete, or a loud failure) so the
+        # detector and pose sessions cannot disagree, and record what was chosen.
+        from predictivesense.perception.runtime import resolve_provider
+
+        self._provider_alias, self._provider_reason = resolve_provider(config.provider)
         if config.detection_enabled:
             from predictivesense.perception.detector import ObjectDetector
 
             self._detector = ObjectDetector(
                 config.detector,
-                provider=config.provider,
+                provider=self._provider_alias,
                 warmup=warmup,
                 intra_op_threads=threads,
             )
@@ -67,16 +72,18 @@ class PerceptionEngine:
 
             self._pose = PoseEstimator(
                 config.pose,
-                provider=config.provider,
+                provider=self._provider_alias,
                 warmup=warmup,
                 intra_op_threads=threads,
             )
         _LOG.info(
-            "perception engine: detection=%s pose=%s provider=%s pose_every_n=%d",
+            "perception engine: detection=%s pose=%s provider(config=%s -> %s) "
+            "pose_cadence=%s",
             config.detection_enabled,
             config.pose_enabled,
             config.provider,
-            config.pose_every_n,
+            self._provider_alias,
+            config.pose_cadence,
         )
 
     # -- inference -------------------------------------------------
@@ -190,7 +197,9 @@ class PerceptionEngine:
         out: dict[str, object] = {
             "detection_enabled": self._detector is not None,
             "pose_enabled": self._pose is not None,
-            "provider": self._config.provider,
+            "provider": self._config.provider,           # what config asked for
+            "provider_resolved": self._provider_alias,   # concrete alias chosen
+            "provider_reason": self._provider_reason,
             "pose_every_n": self._config.pose_every_n,
             "pose_cadence": self._config.pose_cadence,
             "pose_cadence_resolved": f"{self._pose_cadence_kind}:{self._pose_cadence_value}",

@@ -287,10 +287,15 @@ class PerceptionConfig(_Section):
     # (measured: combined detector+pose p50 collapses from ~90 ms to ~440 ms
     # under contention). 6 is the measured knee on this 14C/18T machine.
     intra_op_threads: int = Field(ge=0, default=6)
-    # Chosen from results/providers_*.json. "cpu" is plain onnxruntime; "dml"
-    # requires onnxruntime-directml in a separate environment (never the main
-    # .venv); "openvino" is optional/deferred.
-    provider: Literal["cpu", "dml", "openvino"] = "cpu"
+    # Phase 8: never hard-code a provider. "auto" picks the first available EP in
+    # a documented order (cuda -> directml -> cpu), always falling back to CPU
+    # and logging which and why (perception/runtime.py::resolve_provider). An
+    # explicitly named provider whose EP is absent is a LOUD failure
+    # (ProviderUnavailableError), never a silent CPU fallback. The EP actually in
+    # use is reported (from the live session's get_providers()) in Diagnostics,
+    # the session manifest and every benchmark result file. "dml" is a kept
+    # alias of "directml" for the historical .venv-dml benchmark path.
+    provider: Literal["auto", "cpu", "cuda", "directml", "dml"] = "auto"
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     pose: PoseConfig = Field(default_factory=PoseConfig)
 
