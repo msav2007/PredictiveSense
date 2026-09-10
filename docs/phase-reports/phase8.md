@@ -177,10 +177,26 @@ dropped_browser_buffer + dropped_mailbox + in_flight`, exact.
 
 _(one row per change; measured, kept or reverted on evidence)_
 
-| # | change | before (capture→paint p50 / capture→snapshot p50) | after | verdict |
+| # | change | before | after | verdict |
 |---|---|---|---|---|
-| — | baseline | 302.1 / 224.66 ms | — | — |
-| 1 | broadcast push-on-publish | _pending_ | _pending_ | _pending_ |
+| — | baseline | capture→paint p50 **302.1** ms · capture→snapshot p50 **224.66** ms · `ws_out` p50/p95 **46.0 / 93.5** ms | — | — |
+| 1 | **broadcast push-on-publish** | `ws_out` p50/p95 **46.0 / 93.5** ms (18.4 % of end-to-end); capture→paint p50 **302.1** ms | `ws_out` p50/p95 **0.0 / 0.0** ms; capture→paint p50 **277.9** ms (headless, noisy) | **KEEP** — the emit→send poll wait is eliminated; capture→snapshot unchanged (249→252 ms, as expected — the hop is *after* emission). |
+
+**Change 1 — broadcast push-on-publish.** `api/broadcast.py`: the fixed
+`asyncio.sleep(1/rate_hz)` poll is replaced by `Broadcaster.publish()` waking
+every client via `loop.call_soon_threadsafe(event.set)` (the analysis thread
+never awaits); each client blocks on that `asyncio.Event`, with a
+`2 × rate_hz` **maximum send-rate ceiling** (`await asyncio.sleep` only if the
+last send was under `0.5/rate_hz` ago — no busy wait) and a `period` fallback
+timeout so a missed wake still refreshes. `publish()` is still O(1)+notify and
+never touches a socket, so a slow client still cannot slow the loop. Commands:
+`benchmark_latency.py … --label {before,after}_pushpub`,
+`benchmark_capture_paint.py … --label {…}`. Measured `stage_ws_out_ms` (the hop
+`frame_age_ms` never counted): **p50 46.0 → 0.0 ms, p95 93.5 → 0.0 ms**. The
+`~24 ms` headless capture→paint p50 drop is consistent with removing half the
+46 ms poll (the remainder is the browser's own `store.subscribe → draw`
+dispatch, unchanged). Preview independence re-verified
+(`test_preview_independence.py` green).
 
 ---
 
