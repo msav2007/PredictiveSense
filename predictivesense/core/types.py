@@ -243,6 +243,15 @@ class StateSnapshot(_Frozen):
     stale: bool = Field(
         description="True when no frame arrived within the configured threshold."
     )
+    pose_stale: bool = Field(
+        default=False,
+        description=(
+            "Phase 8: True when `poses` were reused from an earlier frame "
+            "(perception.pose_cadence). The overlay de-emphasises a stale "
+            "skeleton; `metrics.pose_age_ms` / `metrics.pose_src_frame_id` carry "
+            "its provenance. Additive - see docs/decisions.md."
+        ),
+    )
 
     def to_wire_json(self) -> str:
         """Serialise to the frozen wire format (compact JSON)."""

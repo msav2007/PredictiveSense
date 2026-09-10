@@ -33,6 +33,10 @@ from typing import TYPE_CHECKING
 
 from predictivesense.camera.file_source import FileSource
 from predictivesense.logging_setup import get_logger
+from predictivesense.pipeline.perception_frame import (
+    build_perception_frame,
+    resolve_model_version,
+)
 from predictivesense.telemetry.manifest import git_state, utc_now_iso
 
 if TYPE_CHECKING:
@@ -109,6 +113,16 @@ class RecordedDriver:
         self._results_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = self._results_dir / f"recorded_{run_id}.jsonl"
         manifest_path = self._results_dir / f"recorded_{run_id}.manifest.json"
+        # Phase 8 section 16: the immutable per-frame PerceptionFrame record,
+        # identical in structure to what the real-time loop exposes. Written to a
+        # SIDECAR so the main JSONL line shape and its byte-determinism guarantee
+        # are unchanged. Only written when perception ran.
+        frames_path = self._results_dir / f"recorded_{run_id}.frames.jsonl"
+        model_version = resolve_model_version() if perception is not None else "unknown"
+        active_ep = "none"
+        if perception is not None:
+            _pi = perception.info()
+            active_ep = str(_pi.get("detector_ep") or _pi.get("provider") or "none")
 
         started = utc_now_iso()
         wall0 = time.monotonic()
@@ -122,6 +136,11 @@ class RecordedDriver:
 
         source = FileSource(src_path, replay_mode=replay_mode)
         source.start()
+        frames_fh = (
+            frames_path.open("w", encoding="utf-8", newline="\n")
+            if perception is not None
+            else None
+        )
         try:
             with jsonl_path.open("w", encoding="utf-8", newline="\n") as fh:
                 while True:
@@ -159,6 +178,25 @@ class RecordedDriver:
                         total_detections += len(dets)
                         total_poses += len(poses)
 
+                        # Section 16 sidecar: identical structure to the loop's
+                        # PerceptionFrame. Deterministic (frame-derived fields
+                        # only) so two runs of this sidecar are byte-identical.
+                        if frames_fh is not None:
+                            pf = build_perception_frame(
+                                frame=frame,
+                                detections=out_dets,
+                                poses=result.poses,
+                                model_version=model_version,
+                                provider=active_ep,
+                                pose_reused=result.pose_reused,
+                                pose_frame_id=result.pose_frame_id,
+                                pose_capture_ts=result.pose_capture_ts,
+                                pose_age_ms=result.pose_age_ms,
+                            )
+                            frames_fh.write(
+                                pf.model_dump_json() + "\n"
+                            )
+
                     line = {
                         "frame_id": frame.frame_id,
                         "capture_ts": frame.capture_ts,
@@ -178,6 +216,8 @@ class RecordedDriver:
                     frames += 1
         finally:
             source.stop()
+            if frames_fh is not None:
+                frames_fh.close()
 
         info = source.info()
         commit, dirty = git_state()

@@ -198,6 +198,57 @@ never touches a socket, so a slow client still cannot slow the loop. Commands:
 dispatch, unchanged). Preview independence re-verified
 (`test_preview_independence.py` green).
 
+| 2 | **completion-driven scheduling** (`consumer.scheduler`) | timer + push-pub: cap→snapshot p50 **251.8** ms · mailbox_dwell p50/p95 **47 / 94** ms · analysis FPS 5.1 | completion + push-pub: cap→snapshot p50 **252.3** ms · mailbox_dwell **47 / 94** ms · analysis FPS 4.9 | **REJECT as default, ship as option.** No measured improvement on this workload. |
+| 3 | **staleness guard** `analysis.max_frame_age_ms` + counter reconciliation | guard off: steady frame_age p95 **307–499** ms, max **492–587** ms; `dropped_stale` n/a | guard 180 ms: steady `dropped_stale` **0** (`frame_age_at_dequeue` p95 ~110 ms ≪ 180); under a slow-detector stall — `dropped_stale` **fires**, frame age **bounded**, no unbounded growth (`test_slow_detector_bounds_latency`) | **ADOPT `max_frame_age_ms: 180`** (dev.yaml). Bounds the tail on a hitch, inert in steady state. |
+| 4 | **pose cadence** `perception.pose_cadence` | every_frame: cap→snapshot p50 **~225** ms · analysis FPS **~6** · drop rate **~0.4** | every_n:2: cap→snapshot p50 **138** ms · p95 **201** · analysis FPS **11.1** · drop rate **0.016** · pose retained (84/187 snapshots carry a reused, stale-flagged skeleton) | **ADOPT `pose_cadence: "every_n:2"`** (dev.yaml). Largest single lever; pose not removed, just off the critical path on alternating frames. |
+
+**Change 2 — completion-driven scheduling.** `pipeline/scheduler.py`
+`run_completion_consumer` blocks on `LatestFrameMailbox.get(block=True,
+timeout=…)` (a `threading.Condition.wait` — **not** a spin; unit-asserted) with a
+`consumer.max_analysis_rate_hz` ceiling. `consumer.scheduler` selects it;
+`LatestFrameMailbox` gained the blocking `get` (default `get()` byte-unchanged).
+Loopback: **timer ≈ completion** (cap→snapshot 251.8 vs 252.3 ms; mailbox_dwell
+identical 47/94 ms). Reason, confirmed by the Section 5 Q1 code reading:
+inference (~130–225 ms) already exceeds the 50 ms timer tick, so the timer's
+catch-up clamp (`next_due = now + period`) makes the timer pick up a frame the
+instant the previous iteration finishes — the same behaviour completion
+scheduling gives. **Default stays `timer`; `completion` is shipped, tested and
+documented** for a machine where inference dips below the tick. Rejected as
+default *on evidence*, per section 7's "revert it if [the numbers] do not
+[support it]".
+
+**Change 3 — staleness guard + counter reconciliation.** `analysis.max_frame_age_ms`
+(0 = off): a frame older than this at mailbox dequeue is dropped and counted
+`dropped_stale`, and the loop takes the next (fresher) frame — "dropping a stale
+frame to keep the response timely is the intended behaviour" (prompt §4). The
+value **180 ms** is derived from §2's `frame_age_at_dequeue` p50 ~60 / p95
+~110 ms: 180 ms never fires on steady jitter (loopback `dropped_stale` = 0) but
+drops a frame once the consumer has fallen ~2 inference-cycles behind. Proven by
+`tests/integration/test_slow_detector_bounds_latency.py`: with a 220 ms fake
+detector (slower than the 66 ms feed), the guard fires, the end-to-end frame age
+stays bounded (< 900 ms p95) and does not grow across a sustained run; without
+the guard the run still terminates and the counters still reconcile. One
+reconciling counter set is exposed on the snapshot (`frames_decoded`,
+`frames_analysed`, `dropped_browser_buffer`, `dropped_mailbox`, `dropped_stale`,
+`frames_in_flight`) and asserted **exact at a drained point** by
+`tests/unit/test_staleness_guard.py::test_counter_reconciliation_over_a_scripted_sequence`
+(`captured == analysed + dropped_overwrite + dropped_stale + in_flight`).
+
+**Change 4 — pose cadence.** `perception.pose_cadence`
+(`every_frame` | `every_n:<int>` | `interval_ms:<float>`) + `pose_max_reuse_ms`.
+On a frame where pose is not due the last pose is **reused as the same immutable
+`Pose` objects** (never mutated, single-owner — the consumer thread — so no
+lock), carrying its own `frame_id` / `capture_ts` / `age_ms` and
+`StateSnapshot.pose_stale = true`; the overlay draws it dimmer, amber-grey and
+dashed. Beyond `pose_max_reuse_ms` the pose is dropped rather than shown wrong.
+Cadence decisions use **frame capture timestamps, not wall time**, so recorded
+mode stays byte-deterministic (`test_perception_frame_parity.py`). Detection
+never waits on pose on a reused frame; on a fresh-pose frame pose still runs
+after the detector (a pose thread was **not** added — Phase 2 measured two ORT
+sessions contending badly). Measured `every_n:2`: cap→snapshot p50
+**225 → 138 ms**, analysis FPS **6 → 11.1**, drop rate **0.4 → 0.016**, pose
+still present on every snapshot (fresh or reused). **Adopted as the dev default.**
+
 ---
 
 ## PART 2 — PHYSICALLY OBSERVED BY THE DEVELOPER (pending, section 20)

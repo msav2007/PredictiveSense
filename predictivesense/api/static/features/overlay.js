@@ -194,7 +194,10 @@ function draw() {
   if (isLayerEnabled("pose")) {
     const visThr =
       runtime.config?.perception?.pose?.keypoint_visibility_threshold ?? 0.3;
-    for (const p of snap.poses || []) drawPose(p, mapX, mapY, visThr);
+    // Phase 8: a reused (stale) skeleton is drawn dimmer and dashed so it is
+    // never mistaken for a fresh pose. Its age is in the Diagnostics readout.
+    const poseStale = !!snap.pose_stale;
+    for (const p of snap.poses || []) drawPose(p, mapX, mapY, visThr, poseStale);
   }
   ctx.restore();
 
@@ -297,27 +300,34 @@ function drawDetection(d, mapX, mapY, band, revealSuppressed) {
   ctx.restore();
 }
 
-function drawPose(p, mapX, mapY, visThr) {
+function drawPose(p, mapX, mapY, visThr, stale = false) {
   const kp = p.keypoints || [];
   ctx.save();
-  ctx.strokeStyle = "#4ade80";
+  // Fresh pose: solid bright green. Stale (reused) pose: dimmer, amber-grey,
+  // dashed edges - visually distinct from a current skeleton.
+  const edgeColour = stale ? "#a1a1aa" : "#4ade80";
+  const dimFresh = stale ? 0.45 : 0.9;
+  const dimLow = stale ? 0.12 : 0.25;
+  ctx.strokeStyle = edgeColour;
   ctx.lineWidth = 2;
+  if (stale) ctx.setLineDash([5, 4]);
   for (const [a, b] of SKELETON_EDGES) {
     const ka = kp[a];
     const kb = kp[b];
     if (!ka || !kb) continue;
     const va = ka[2] >= visThr;
     const vb = kb[2] >= visThr;
-    ctx.globalAlpha = va && vb ? 0.9 : 0.25;
+    ctx.globalAlpha = va && vb ? dimFresh : dimLow;
     ctx.beginPath();
     ctx.moveTo(mapX(ka[0]), mapY(ka[1]));
     ctx.lineTo(mapX(kb[0]), mapY(kb[1]));
     ctx.stroke();
   }
+  ctx.setLineDash([]);
   for (const k of kp) {
     const vis = k[2] >= visThr;
-    ctx.globalAlpha = vis ? 1 : 0.3;
-    ctx.fillStyle = vis ? "#bbf7d0" : "#6b7280";
+    ctx.globalAlpha = (vis ? 1 : 0.3) * (stale ? 0.5 : 1);
+    ctx.fillStyle = vis ? (stale ? "#d4d4d8" : "#bbf7d0") : "#6b7280";
     ctx.beginPath();
     ctx.arc(mapX(k[0]), mapY(k[1]), vis ? 3 : 2, 0, Math.PI * 2);
     ctx.fill();

@@ -165,9 +165,12 @@ def _end_to_end(cfg, imgs, *, seconds: float):
     stage_names = (
         "worker_encode", "ws_transit", "decode", "src_buffer_dwell",
         "producer_handoff", "mailbox_dwell", "detector", "pose", "policy",
-        "snapshot_build", "ws_out", "capture_to_snapshot",
+        "snapshot_build", "ws_out", "capture_to_snapshot", "frame_age_at_dequeue",
     )
     stage_samples: dict[str, list[float]] = {n: [] for n in stage_names}
+    dropped_stale_last = [0.0]
+    counters_reconcile_ok = [True]
+    pose_reused_n = [0]
     proc = psutil.Process()
     rss0 = proc.memory_info().rss / 1e6
     proc.cpu_percent(None)
@@ -198,6 +201,11 @@ def _end_to_end(cfg, imgs, *, seconds: float):
                             _v = m.get(f"stage_{_n}_ms")
                             if isinstance(_v, (int, float)) and _v >= 0:
                                 stage_samples[_n].append(float(_v))
+                        dropped_stale_last[0] = float(m.get("dropped_stale", 0.0))
+                        if "counters_reconcile" in m and m["counters_reconcile"] < 1.0:
+                            counters_reconcile_ok[0] = False
+                        if m.get("pose_reused", 0.0) >= 1.0:
+                            pose_reused_n[0] += 1
 
         rt = threading.Thread(target=_reader, daemon=True)
         rt.start()
@@ -253,6 +261,9 @@ def _end_to_end(cfg, imgs, *, seconds: float):
         "rss_mb_before": round(rss0, 1),
         "rss_mb_after": round(rss1, 1),
         "stages": stages,
+        "dropped_stale": dropped_stale_last[0],
+        "counters_reconcile": counters_reconcile_ok[0],
+        "pose_reused_snapshots": pose_reused_n[0],
     }
 
 
@@ -270,10 +281,33 @@ def main(argv=None) -> int:
     p.add_argument("--label", default="loopback",
                    help="label for the Phase 8 stage-attribution files "
                         "results/latency_stages_<label>.{json,md}")
+    p.add_argument("--scheduler", choices=("timer", "completion"), default=None,
+                   help="override consumer.scheduler for this run (Phase 8)")
+    p.add_argument("--max-frame-age-ms", type=float, default=None,
+                   help="override analysis.max_frame_age_ms (staleness guard, Phase 8)")
+    p.add_argument("--pose-cadence", default=None,
+                   help="override perception.pose_cadence, e.g. every_frame, "
+                        "every_n:2, interval_ms:200 (Phase 8)")
     args = p.parse_args(argv)
     configure_logging("INFO")
 
     cfg = load_config(args.profile)
+    if args.scheduler:
+        cfg = cfg.model_copy(update={
+            "consumer": cfg.consumer.model_copy(update={"scheduler": args.scheduler})
+        })
+    if args.pose_cadence:
+        cfg = cfg.model_copy(update={
+            "perception": cfg.perception.model_copy(
+                update={"pose_cadence": args.pose_cadence}
+            )
+        })
+    if args.max_frame_age_ms is not None:
+        cfg = cfg.model_copy(update={
+            "analysis": cfg.analysis.model_copy(
+                update={"max_frame_age_ms": args.max_frame_age_ms}
+            )
+        })
     src = Path(args.source)
     if not src.exists():
         _LOG.error("source not found: %s", src)
@@ -303,11 +337,18 @@ def main(argv=None) -> int:
         try:
             import subprocess
 
+            sub_argv = [_sys.executable, __file__, "--only-end-to-end",
+                        "--source", args.source, "--profile", args.profile,
+                        "--limit", str(args.limit),
+                        "--end-to-end-seconds", str(args.end_to_end_seconds)]
+            if args.scheduler:
+                sub_argv += ["--scheduler", args.scheduler]
+            if args.pose_cadence:
+                sub_argv += ["--pose-cadence", args.pose_cadence]
+            if args.max_frame_age_ms is not None:
+                sub_argv += ["--max-frame-age-ms", str(args.max_frame_age_ms)]
             cp = subprocess.run(
-                [_sys.executable, __file__, "--only-end-to-end",
-                 "--source", args.source, "--profile", args.profile,
-                 "--limit", str(args.limit),
-                 "--end-to-end-seconds", str(args.end_to_end_seconds)],
+                sub_argv,
                 capture_output=True, text=True, timeout=args.end_to_end_seconds + 180,
             )
             line = next((l for l in cp.stdout.splitlines() if l.startswith("E2E_JSON:")), None)
