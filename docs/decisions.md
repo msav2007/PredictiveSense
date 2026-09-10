@@ -748,8 +748,19 @@ this build).
   present on every snapshot. A pose worker thread was **not** added (Phase 2
   measured two ORT sessions contend badly). `eval.yaml` keeps `every_frame` -
   the evaluation harness must run pose on every frame.
-- **Detector input size** `perception.detector.input_size` - see the Phase 8
-  report's input-size section; decision recorded there with its result file.
+- **Detector input size** `perception.detector.input_size` - **`dev.yaml` -> 480**
+  (`eval.yaml` stays 640). `scripts/benchmark_recognition_paths.py` swept
+  320 / 480 / 640 on the integrated-camera clip with primary-tier detection
+  counts + score percentiles (`results/recognition_paths.md`): the primary-tier
+  (safety-relevant) detection count is **identical (197) at every size** and the
+  score distribution is flat (p50 0.90-0.91); only *non-primary* detections rise
+  as size falls, and the policy already handles those. Detector p50:
+  640 -> 73 ms, 480 -> 46 ms, 320 -> 25 ms. 480 halves detector cost with zero
+  primary loss; 320's extra gain is small and ~10x's the non-primary noise. The
+  pose model input is ONNX-locked to 640, so only the detector changes. The
+  evaluation harness (`eval.yaml`) keeps 640 - most sensitive, not latency-bound.
+  Developer confirms primary recall on the OnePlus 720p clip (phase 8 report
+  Part 2).
 
 ### Hardware-portable runtime
 

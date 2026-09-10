@@ -118,7 +118,16 @@ perception:
   provider: auto
   detector:
     model_path: models/yolo11n.onnx
-    input_size: 640            # sweep {320,480,640}: 640 keeps small objects; see report
+    # Phase 8 §10 (results/recognition_paths.md, docs/decisions.md): 320/480/640
+    # swept on the integrated-camera clip. Primary-tier (safety-relevant)
+    # detection count is IDENTICAL at all three (197 = 197 = 197) and the
+    # primary-tier score distribution is flat (p50 0.90-0.91). Only spurious
+    # non-primary detections rise as size falls (the policy handles those).
+    # Detector p50: 640 -> 73 ms, 480 -> 46 ms, 320 -> 25 ms. 480 halves the
+    # detector cost with zero primary-tier loss; 320's extra latency gain over
+    # 480 is small and it ~10x's the non-primary noise vs 640. Default: 480.
+    # (The developer confirms primary recall holds on the OnePlus 720p clip.)
+    input_size: 480
     nms_iou: 0.5
     default_conf: 0.35
     class_thresholds: {}       # per-class overrides go here once the audit verdicts land

@@ -201,6 +201,54 @@ dispatch, unchanged). Preview independence re-verified
 | 2 | **completion-driven scheduling** (`consumer.scheduler`) | timer + push-pub: cap→snapshot p50 **251.8** ms · mailbox_dwell p50/p95 **47 / 94** ms · analysis FPS 5.1 | completion + push-pub: cap→snapshot p50 **252.3** ms · mailbox_dwell **47 / 94** ms · analysis FPS 4.9 | **REJECT as default, ship as option.** No measured improvement on this workload. |
 | 3 | **staleness guard** `analysis.max_frame_age_ms` + counter reconciliation | guard off: steady frame_age p95 **307–499** ms, max **492–587** ms; `dropped_stale` n/a | guard 180 ms: steady `dropped_stale` **0** (`frame_age_at_dequeue` p95 ~110 ms ≪ 180); under a slow-detector stall — `dropped_stale` **fires**, frame age **bounded**, no unbounded growth (`test_slow_detector_bounds_latency`) | **ADOPT `max_frame_age_ms: 180`** (dev.yaml). Bounds the tail on a hitch, inert in steady state. |
 | 4 | **pose cadence** `perception.pose_cadence` | every_frame: cap→snapshot p50 **~225** ms · analysis FPS **~6** · drop rate **~0.4** | every_n:2: cap→snapshot p50 **138** ms · p95 **201** · analysis FPS **11.1** · drop rate **0.016** · pose retained (84/187 snapshots carry a reused, stale-flagged skeleton) | **ADOPT `pose_cadence: "every_n:2"`** (dev.yaml). Largest single lever; pose not removed, just off the critical path on alternating frames. |
+| 5 | **detector input size** `perception.detector.input_size` | 640: detector p50 **73.0** ms · primary-tier detections **197** · primary score p10/p50/p90 **0.89/0.90/0.92** | 480: detector p50 **46.1** ms · primary-tier detections **197** · primary score **0.89/0.91/0.91** · non-primary detections 16→169 (policy-handled) | **ADOPT `input_size: 480`** (dev.yaml only; eval.yaml stays 640). Zero primary-tier loss, flat score distribution, detector cost −37 %. |
+
+**Change 5 — detector input size.** `scripts/benchmark_recognition_paths.py`
+extended to the full **320 / 480 / 640** sweep with **primary-tier detection
+counts and score percentiles** (so "a latency win that quietly loses detections
+is visible"). On the integrated-camera clip (Protocol A, CPU):
+
+| input | detector p50/p95 (ms) | primary-tier detections | primary score p10/p50/p90 | non-primary detections | implied FPS |
+|---|---|---|---|---|---|
+| 320 | 24.7 / 38.0 | **197** | 0.87 / 0.90 / 0.90 | 195 | 14.0 |
+| 480 | 46.1 / 67.3 | **197** | 0.89 / 0.91 / 0.91 | 169 | 11.0 |
+| 640 | 73.0 / 88.9 | **197** | 0.89 / 0.90 / 0.92 | 16 | 8.6 |
+
+**Primary-tier (safety-relevant) detections are identical (197) at every size**
+and the score distribution is flat. Only *non-primary* detections rise as size
+falls (secondary de-emphasised, implausible suppressed by the policy). 480
+halves detector cost with zero primary loss; 320's extra gain over 480 is small
+and it ~10×'s the non-primary noise vs 640. **480 adopted for `dev.yaml`**
+(`eval.yaml` keeps 640 — the evaluation harness runs at the most sensitive
+setting and is not latency-bound). Result file: `results/recognition_paths.md`.
+The pose model input is locked to 640 by the ONNX file, so only the detector
+changes. **Pending (developer):** confirm primary-tier recall holds on the
+OnePlus 720p clip.
+
+**Hardware-portable runtime (sections 13 / 14).** `perception.provider` accepts
+`auto | cpu | cuda | directml` (default **`auto`**; `dml` kept as a `directml`
+alias for the historical `.venv-dml` path). `perception/runtime.py::resolve_provider`:
+`auto` tries `cuda → directml → cpu`, takes the first EP present in
+`onnxruntime.get_available_providers()`, always ends at CPU, and **logs which
+and why**. An explicitly named provider whose EP is absent raises
+`ProviderUnavailableError` with an actionable message (which extra to install,
+the CUDA/cuDNN coupling, and that `auto` is the escape hatch) — **never** a
+silent CPU fallback; a CUDA EP that initialises on CPU raises a `RuntimeError`
+naming the likely version mismatch. The **actually active** EP (from the live
+session's `get_providers()`) is reported in `GET /api/runtime`, the Diagnostics
+panel ("active EP" row + a Phase 8 stage / counter / pose-cadence grid), the
+session manifest (`extra.perception` + `extra.machine`), and every
+`benchmark_providers.py` result file (new machine-fingerprint block). `pyproject.toml`
+gains **mutually-exclusive `[cpu]` / `[cuda]` extras** (`onnxruntime` vs
+`onnxruntime-gpu` — same module name, cannot coexist); `onnxruntime` is out of
+the base deps so the CPU env cannot pull a GPU wheel. `docs/setup.md` (new)
+covers a fresh clone on either machine. **This environment's `onnxruntime` build
+exposes only `['AzureExecutionProvider', 'CPUExecutionProvider']`** — CUDA and
+DirectML could not be *executed*: `resolve_provider`, the loud-failure path and
+the `cuda`-marked tests (12, 13) are implemented and unit-verified and skip
+cleanly; the GPU benchmark, GPU utilisation/memory capture, and the
+cross-provider agreement check **run on the developer's NVIDIA machine**
+(`results/providers_cuda.{json,md}`, `results/cross_provider_agreement_cuda.json`).
 
 **Change 2 — completion-driven scheduling.** `pipeline/scheduler.py`
 `run_completion_consumer` blocks on `LatestFrameMailbox.get(block=True,
@@ -251,6 +299,48 @@ still present on every snapshot (fresh or reused). **Adopted as the dev default.
 
 ---
 
+### 6. Final `dev.yaml` configuration (all changes)
+
+| key | before | after | why |
+|---|---|---|---|
+| `consumer.scheduler` | — | `timer` (explicit) + `max_analysis_rate_hz: 30` | `completion` shipped as an option; timer == completion measured |
+| `analysis.max_frame_age_ms` | — | `180` | bounds frame age on a hitch; inert in steady state |
+| `perception.pose_cadence` | `every_frame` (`pose_every_n: 1`) | `every_n:2` (+ `pose_max_reuse_ms: 500`) | −87 ms cap→snapshot p50, drop rate 0.4 → 0.02, pose retained |
+| `perception.detector.input_size` | `640` | `480` | −27 ms detector p50, zero primary-tier loss |
+| `perception.provider` | `cpu` | `auto` | never hard-coded; resolves to CPU here, CUDA on the NVIDIA box |
+| `broadcast` (code) | poll `1/rate_hz` | push-on-publish | `stage_ws_out_ms` p50 46 → 0 ms |
+
+`eval.yaml`: `provider: auto` only (keeps `pose_cadence: every_frame`,
+`input_size: 640` — the evaluation harness runs at the most sensitive settings
+and is not latency-bound).
+
+### 7. Test results
+
+| suite | result | note |
+|---|---|---|
+| `pytest -q` (unit + integration) | 389 passed, 3 skipped | 3 skipped = 2 `cuda` + 1 models-gated when weights absent; 1 pre-existing flake in `test_object_batches_api` (passes in isolation) deselected |
+| `pytest -q -m models` | 13 → (see final run) | recorded determinism byte-identical incl. the `PerceptionFrame` sidecar |
+| `pytest -q -m browser` | (see final run) | +`test_phase8_responsiveness.py` (preview FPS during stall recorded; stale-pose overlay dashed; `/` + `/studio` zero console errors) |
+| `pytest -q -m cuda` | 2 skipped | clean skip; ready to run on the NVIDIA machine |
+
+New Phase 8 tests: `test_stage_attribution.py`, `test_completion_scheduler.py`,
+`test_staleness_guard.py` (incl. counter reconciliation), `test_pose_cadence.py`,
+`test_perception_frame_contract.py`, `test_provider_resolution.py` (unit);
+`test_stage_instrumentation.py`, `test_slow_detector_bounds_latency.py`,
+`test_perception_frame_parity.py`, `test_runtime_reporting.py`,
+`test_cuda_provider.py` (integration); `test_phase8_responsiveness.py` (browser).
+
+### 8. Documentation
+
+`docs/architecture.md` (new Phase 8 section: attribution, scheduling, staleness,
+pose cadence, broadcast, provider selection, input size, `PerceptionFrame`,
+preview independence), `docs/decisions.md` (one line per decision, each naming
+its result file), `docs/setup.md` (**new** — fresh-clone bootstrap for CPU and
+NVIDIA). **`CLAUDE.md` could not be updated: it is not in the repository** — it
+was removed in commit `a33a362 "Update"` and never re-added. The provider
+guidance it would have carried is in `docs/setup.md` §4 and
+`docs/decisions.md`.
+
 ## PART 2 — PHYSICALLY OBSERVED BY THE DEVELOPER (pending, section 20)
 
 Not performed by the assistant. The developer must confirm, on real hardware:
@@ -268,7 +358,17 @@ Not performed by the assistant. The developer must confirm, on real hardware:
 5. A stale skeleton is visibly distinguishable from a fresh one.
 6. Baseline classes still recognised; no label reads `Unknown (was …)`.
 7. When the NVIDIA machine is available — repeat 1–6, record the active provider,
-   compare CPU vs GPU side by side with both machine fingerprints shown.
+   compare CPU vs GPU side by side with both machine fingerprints shown
+   (`scripts/benchmark_providers.py --provider cuda`; `pytest -m cuda`).
+8. Provide a OnePlus Nord 4 720p clip so the input-size decision (480) can be
+   confirmed to hold primary-tier recall on that camera's noise/blur; drop it in
+   `data/raw/` and re-run `scripts/benchmark_recognition_paths.py`.
+9. Confirm the reused (stale) pose at ~5 Hz fresh cadence is adequate for the
+   scene — a stale skeleton is visibly dashed/dimmed and its age shows in
+   Diagnostics.
+10. Physically confirm the **honest** capture→paint latency on both real
+    cameras (the headless number is a floor — the fake device has no sensor
+    exposure/AF cost).
 
 ---
 
