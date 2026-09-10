@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -25,6 +26,7 @@ from predictivesense.logging_setup import get_logger
 from predictivesense.perception.engine import PerceptionEngine, build_perception
 from predictivesense.perception.policy import RecognitionPolicy
 from predictivesense.telemetry.metrics import MetricRegistry
+from predictivesense.telemetry.stages import FrameStages, record_stages
 
 __all__ = ["AnalysisLoop", "build_loop", "build_camera_source"]
 
@@ -90,6 +92,10 @@ class AnalysisLoop:
         self._listeners: list[SnapshotListener] = []
         self._snapshot_id = 0
         self._latest: StateSnapshot | None = None
+        # Phase 8: bounded ring of per-frame stage-attribution records for
+        # analysed browser frames. Read by the integration test and the
+        # attribution benchmark; never unbounded.
+        self._frame_stages: deque[FrameStages] = deque(maxlen=256)
         self._last_frame_mono: float | None = None
         self._last_iter_ms = 0.0
         self._max_mailbox_depth = 0
@@ -108,6 +114,11 @@ class AnalysisLoop:
     @property
     def max_mailbox_depth(self) -> int:
         return self._max_mailbox_depth
+
+    def frame_stages(self) -> list[FrameStages]:
+        """A copy of the recent per-frame stage-attribution records (Phase 8)."""
+
+        return list(self._frame_stages)
 
     @property
     def source(self) -> FrameSource:
@@ -264,6 +275,8 @@ class AnalysisLoop:
                     if not self._source.is_running:
                         break
                     continue
+                if frame.trace is not None:
+                    frame.trace.mbox_enqueue_ts = time.monotonic()
                 self._mailbox.put(frame)
                 producer_rate.mark()
         except BaseException as exc:  # noqa: BLE001 - set flag, let thread exit
@@ -311,6 +324,12 @@ class AnalysisLoop:
         now = time.monotonic()
         if frame is not None:
             self._last_frame_mono = now
+            if frame.trace is not None:
+                frame.trace.mbox_dequeue_ts = now
+                if frame.trace.capture_ts is not None:
+                    frame.trace.frame_age_at_dequeue_ms = (
+                        now - frame.trace.capture_ts
+                    ) * 1000.0
         self.metrics.rate("loop").mark(now=now)
 
         stale = self._last_frame_mono is None or (
@@ -353,6 +372,37 @@ class AnalysisLoop:
         }
         self._merge_source_metrics(metrics)
         metrics.update(perception_metrics)
+
+        # Phase 8 stage attribution: fold this frame's per-stage stamps into the
+        # existing MetricRegistry and keep the frozen record. Only browser-ingest
+        # frames carry a trace; everything else is unaffected.
+        if frame is not None and frame.trace is not None:
+            tr = frame.trace
+            tr.detector_ms = perception_metrics.get("detector_ms")
+            tr.pose_ms = perception_metrics.get("pose_ms")
+            tr.policy_ms = perception_metrics.get("policy_ms")
+            if tr.detector_ms is not None and tr.detector_ms < 0:
+                tr.detector_ms = None
+            if tr.pose_ms is not None and tr.pose_ms < 0:
+                tr.pose_ms = None
+            if tr.policy_ms is not None and tr.policy_ms < 0:
+                tr.policy_ms = None
+            tr.snapshot_ts = time.monotonic()
+            stages = record_stages(tr, self.metrics, frame_id=frame.frame_id)
+            self._frame_stages.append(stages)
+            for key, value in stages.as_dict().items():
+                if key == "frame_id" or value is None or isinstance(value, bool):
+                    continue
+                metrics[f"stage_{key}"] = float(value)
+            if tr.capture_client_ms is not None:
+                metrics["capture_client_ts_ms"] = float(tr.capture_client_ms)
+            # ws_out is stamped by the broadcaster into the same registry a beat
+            # later than this snapshot; surface its running p50/p95 (lagged by
+            # one) so Diagnostics and the attribution reader see the hop.
+            ws_out = self.metrics.samples("stage_ws_out_ms")
+            if ws_out.count:
+                metrics["stage_ws_out_ms_p50"] = ws_out.p50
+                metrics["stage_ws_out_ms_p95"] = ws_out.p95
 
         self._snapshot_id += 1
         snapshot = StateSnapshot(

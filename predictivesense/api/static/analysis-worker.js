@@ -39,6 +39,7 @@ let helloSentMs = 0;
 let wsRttMs = null; // browser-observed hello round trip (approx)
 
 let encodeBusy = false; // newest-wins guard: one encode in flight at a time
+let pendingCapMs = 0; // nowMs() at drawImage of the frame currently encoding (Phase 8)
 
 const counters = {
   framesIn: 0, // frames pulled from the stream
@@ -110,6 +111,10 @@ function frameMessage(bytes) {
     seq: seq++,
     w: cfg.width,
     h: cfg.height,
+    // Phase 8 stage attribution: true capture instant (drawImage) and the
+    // worker's own JPEG encode duration. Additive; an older server ignores them.
+    cap_ts_ms: pendingCapMs || nowMs(),
+    enc_ms: Number(encMsLast.toFixed(2)),
   });
   const headerBytes = new TextEncoder().encode(header);
   const buf = new ArrayBuffer(4 + headerBytes.length + bytes.length);
@@ -141,6 +146,7 @@ function handleFrame(source) {
   if (reason) return;
 
   lastSendMs = performance.now();
+  pendingCapMs = nowMs(); // true capture instant for this frame (Phase 8)
   encodeBusy = true;
   try {
     ctx.drawImage(source, 0, 0, cfg.width, cfg.height);

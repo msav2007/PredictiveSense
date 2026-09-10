@@ -84,6 +84,7 @@ async def ws_ingest(websocket: WebSocket) -> None:
                 source.note_malformed()
                 stats["malformed"] += 1
                 continue
+            recv_ts = time.monotonic()
             try:
                 header, jpeg = decode_ingest_message(data, max_bytes=max_bytes)
             except FramingError as exc:
@@ -91,7 +92,7 @@ async def ws_ingest(websocket: WebSocket) -> None:
                 stats["malformed"] += 1
                 _LOG.debug("dropped malformed ingest message: %s", exc)
                 continue
-            await asyncio.to_thread(source.submit, header, jpeg)
+            await asyncio.to_thread(source.submit, header, jpeg, recv_ts=recv_ts)
             frames += 1
             stats["frames"] += 1
     except WebSocketDisconnect:

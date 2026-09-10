@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from typing import Any, Protocol
 
 from predictivesense.core.types import StateSnapshot
 from predictivesense.logging_setup import get_logger
+from predictivesense.telemetry.metrics import MetricRegistry
 
 __all__ = ["Broadcaster", "serve_state_client", "WebSocketLike"]
 
@@ -74,10 +76,17 @@ async def serve_state_client(
     *,
     rate_hz: float,
     send_timeout_s: float,
+    metrics: MetricRegistry | None = None,
 ) -> bool:
     """Push snapshots to one client until it disconnects or is dropped.
 
     Returns ``True`` if the client was dropped for being too slow.
+
+    When ``metrics`` is supplied, the emit->send delay for each snapshot this
+    client receives is folded into ``stage_ws_out_ms`` - the Phase 8 broadcast
+    hop that ``StateSnapshot.frame_age_ms`` never counted. With push-on-publish
+    (Phase 8) this is the wake+send cost; on the legacy poll it also carries the
+    up-to-``period`` scheduling wait.
     """
 
     period = 1.0 / rate_hz
@@ -90,6 +99,10 @@ async def serve_state_client(
             snapshot = broadcaster.latest()
             if snapshot is None or snapshot.snapshot_id == last_id:
                 continue
+            if metrics is not None:
+                delay_ms = (time.monotonic() - snapshot.emitted_ts) * 1000.0
+                if delay_ms >= 0.0:
+                    metrics.samples("stage_ws_out_ms", maxlen=4096).add(delay_ms)
             try:
                 await asyncio.wait_for(
                     websocket.send_text(snapshot.to_wire_json()),

@@ -18,6 +18,8 @@ export const runtime = {
   workerMetrics: {}, // last {type:"metrics"} block from the worker
   lastSnapshot: null, // last StateSnapshot from /ws/state
   ageSamples: [], // frame_age_ms reservoir for p50/p95 (bounded)
+  paintAgeSamples: [], // Phase 8: capture(drawImage)->overlay-paint age, ms (bounded)
+  lastPaintMs: 0, // Phase 8: overlay draw() duration, ms
   recorder: null,
   recChunks: [],
   recStart: 0,

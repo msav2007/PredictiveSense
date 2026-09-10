@@ -15,7 +15,7 @@
  */
 "use strict";
 
-import { runtime, emit } from "/static/features/runtime.js";
+import { runtime, emit, MAX_AGE_SAMPLES } from "/static/features/runtime.js";
 import { store } from "/static/ui/store.js";
 import { isLayerEnabled } from "/static/features/analysis-prefs.js";
 import { effectiveDetection, isPolicyView, onPolicyViewChange } from "/static/features/policy.js";
@@ -165,6 +165,7 @@ function displayRect() {
 
 function draw() {
   if (!ctx || !canvas) return;
+  const paintT0 = performance.now();
   const wrap = canvas.parentElement.parentElement || canvas.parentElement;
   ctx.clearRect(0, 0, wrap.clientWidth, wrap.clientHeight);
 
@@ -203,6 +204,22 @@ function draw() {
     ctx.fillStyle = "#ffb454";
     ctx.fillText("STALE — last analysis shown, not current", rect.x + 8, rect.y + 18);
     ctx.restore();
+  }
+
+  // Phase 8 capture->paint attribution. `capture_client_ts_ms` is the worker's
+  // own drawImage epoch-ms clock echoed back through the snapshot, so this
+  // subtraction is a pure client-clock delta with no cross-clock error. Only
+  // meaningful for a fresh (non-stale) frame.
+  runtime.lastPaintMs = performance.now() - paintT0;
+  const capMs = snap.metrics && snap.metrics.capture_client_ts_ms;
+  if (!snap.stale && typeof capMs === "number" && capMs > 0) {
+    const paintAge = performance.timeOrigin + performance.now() - capMs;
+    if (paintAge >= 0 && paintAge < 60000) {
+      runtime.paintAgeSamples.push(paintAge);
+      if (runtime.paintAgeSamples.length > MAX_AGE_SAMPLES) {
+        runtime.paintAgeSamples.shift();
+      }
+    }
   }
 }
 

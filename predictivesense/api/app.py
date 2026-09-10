@@ -221,6 +221,7 @@ def create_app(
             broadcaster,
             rate_hz=config.broadcast.rate_hz,
             send_timeout_s=config.broadcast.client_send_timeout_s,
+            metrics=analysis_loop.metrics,
         )
 
     return app

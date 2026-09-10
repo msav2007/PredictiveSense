@@ -142,13 +142,17 @@ def _end_to_end(cfg, imgs, *, seconds: float):
         "source": cfg.source.model_copy(update={"kind": SourceKind.BROWSER}),
     })
     jpegs = []
+    enc_proxy_ms: list[float] = []
     for img in imgs:
         small = cv2.resize(img, (cfg.capture.analysis_width, cfg.capture.analysis_height))
+        _t0 = time.perf_counter()
         ok, buf = cv2.imencode(".jpg", small,
                                [int(cv2.IMWRITE_JPEG_QUALITY),
                                 int(cfg.capture.analysis_jpeg_quality * 100)])
+        _enc = (time.perf_counter() - _t0) * 1000.0
         if ok:
             jpegs.append(buf.tobytes())
+            enc_proxy_ms.append(_enc)
     if not jpegs:
         return None
 
@@ -157,6 +161,13 @@ def _end_to_end(cfg, imgs, *, seconds: float):
     pose_ms: list[float] = []
     fps: list[float] = []
     drop: list[float] = []
+    # Phase 8: per-stage attribution collected from the snapshot `stage_*` keys.
+    stage_names = (
+        "worker_encode", "ws_transit", "decode", "src_buffer_dwell",
+        "producer_handoff", "mailbox_dwell", "detector", "pose", "policy",
+        "snapshot_build", "ws_out", "capture_to_snapshot",
+    )
+    stage_samples: dict[str, list[float]] = {n: [] for n in stage_names}
     proc = psutil.Process()
     rss0 = proc.memory_info().rss / 1e6
     proc.cpu_percent(None)
@@ -183,6 +194,10 @@ def _end_to_end(cfg, imgs, *, seconds: float):
                         if m.get("analysis_fps", 0) > 0:
                             fps.append(m["analysis_fps"])
                         drop.append(m.get("drop_rate", 0.0))
+                        for _n in stage_names:
+                            _v = m.get(f"stage_{_n}_ms")
+                            if isinstance(_v, (int, float)) and _v >= 0:
+                                stage_samples[_n].append(float(_v))
 
         rt = threading.Thread(target=_reader, daemon=True)
         rt.start()
@@ -194,9 +209,14 @@ def _end_to_end(cfg, imgs, *, seconds: float):
             i = 0
             while time.monotonic() < t_end:
                 jpeg = jpegs[i % len(jpegs)]
+                cap_ms = time.time() * 1000.0  # "drawImage" instant
+                # `jpeg` is pre-encoded; attribute the measured encode proxy so
+                # the worker_encode stage is populated in the loopback table.
                 header = IngestHeader(
                     client_ts_ms=time.time() * 1000.0, seq=i,
                     w=cfg.capture.analysis_width, h=cfg.capture.analysis_height,
+                    cap_ts_ms=cap_ms,
+                    enc_ms=round(enc_proxy_ms[i % len(enc_proxy_ms)], 2),
                 )
                 ws.send_bytes(encode_ingest_message(header, jpeg))
                 i += 1
@@ -207,6 +227,19 @@ def _end_to_end(cfg, imgs, *, seconds: float):
 
     cpu = proc.cpu_percent(None)
     rss1 = proc.memory_info().rss / 1e6
+    stages = {
+        n: {"p50": _pct(v, 50), "p95": _pct(v, 95), "n": len(v)}
+        for n, v in stage_samples.items()
+    }
+    # ws_out is stamped by the broadcaster into the loop's registry, not onto the
+    # snapshot - read it directly (same process).
+    try:
+        wso = app.state.loop.metrics.samples("stage_ws_out_ms")
+        if wso.count:
+            stages["ws_out"] = {"p50": round(wso.p50, 2), "p95": round(wso.p95, 2),
+                                "n": wso.count}
+    except Exception:  # noqa: BLE001 - measurement only
+        pass
     return {
         "samples": len(ages),
         "frame_age_ms_p50": _pct(ages, 50),
@@ -219,6 +252,7 @@ def _end_to_end(cfg, imgs, *, seconds: float):
         "process_cpu_percent": round(cpu, 1),
         "rss_mb_before": round(rss0, 1),
         "rss_mb_after": round(rss1, 1),
+        "stages": stages,
     }
 
 
@@ -233,6 +267,9 @@ def main(argv=None) -> int:
     p.add_argument("--only-end-to-end", action="store_true",
                    help="run ONLY the end-to-end loopback and print its JSON (used as a "
                         "clean subprocess so ORT-session contention does not skew it)")
+    p.add_argument("--label", default="loopback",
+                   help="label for the Phase 8 stage-attribution files "
+                        "results/latency_stages_<label>.{json,md}")
     args = p.parse_args(argv)
     configure_logging("INFO")
 
@@ -306,7 +343,165 @@ def main(argv=None) -> int:
     (results_dir / "latency_2_5.md").write_text(_md(out), encoding="utf-8")
     _LOG.info("policy p95 %.3f ms (<1ms: %s)", pol_p95, out["policy_cost_under_1ms_p95"])
     _LOG.info("wrote %s", results_dir / "latency_2_5.md")
+
+    e = out.get("end_to_end")
+    if isinstance(e, dict) and "error" not in e and e.get("stages"):
+        _write_attribution(e, results_dir, args.label, cfg, args)
+        _LOG.info("wrote %s", results_dir / f"latency_stages_{args.label}.md")
     return 0
+
+
+def _machine_fingerprint(cfg) -> dict:
+    """Minimal machine + runtime fingerprint for a stage-attribution file."""
+
+    import platform
+
+    import psutil
+
+    fp: dict = {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "logical_cores": psutil.cpu_count(logical=True),
+        "ram_gb": round(psutil.virtual_memory().total / 1e9, 1),
+        "provider_config": cfg.perception.provider,
+        "intra_op_threads": cfg.perception.intra_op_threads,
+        "detector_input_size": cfg.perception.detector.input_size,
+        "analysis": f"{cfg.capture.analysis_width}x{cfg.capture.analysis_height}"
+                    f"@{cfg.capture.analysis_fps}fps q{cfg.capture.analysis_jpeg_quality}",
+    }
+    try:
+        import onnxruntime as ort
+
+        fp["onnxruntime"] = ort.__version__
+        fp["available_providers"] = list(ort.get_available_providers())
+    except Exception:  # noqa: BLE001
+        fp["onnxruntime"] = "unavailable"
+    try:
+        proc = _sys  # noqa: F841 - placeholder to keep structure obvious
+        cpu = platform.processor()
+        if cpu:
+            fp["cpu"] = cpu
+    except Exception:  # noqa: BLE001
+        pass
+    return fp
+
+
+# Ordered stage list for the attribution table. `ws_out` and `overlay_paint` are
+# attributed here only when a value is present (loopback has ws_out, no paint;
+# the fake-camera headless run has both).
+_ATTR_STAGES: tuple[tuple[str, str], ...] = (
+    ("worker_encode", "browser JPEG encode"),
+    ("ws_transit", "send -> server receive"),
+    ("decode", "cv2.imdecode"),
+    ("src_buffer_dwell", "BrowserSource slot dwell"),
+    ("producer_handoff", "producer read -> mailbox put"),
+    ("mailbox_dwell", "LatestFrameMailbox dwell"),
+    ("detector", "detector inference"),
+    ("pose", "pose inference"),
+    ("policy", "recognition policy"),
+    ("snapshot_build", "snapshot assembly"),
+    ("ws_out", "emit -> /ws/state send"),
+    ("overlay_paint", "capture -> overlay paint (browser)"),
+)
+
+
+def _write_attribution(e: dict, results_dir: Path, label: str, cfg, args) -> None:
+    """Write results/latency_stages_<label>.{json,md} - each stage p50/p95 and
+    its share of the end-to-end capture->snapshot p50."""
+
+    stages = e.get("stages", {})
+    total_p50 = e.get("frame_age_ms_p50") or 0.0
+    cap_to_snap = stages.get("capture_to_snapshot", {}).get("p50") or total_p50
+
+    rows = []
+    attributed_p50 = 0.0
+    for key, human in _ATTR_STAGES:
+        s = stages.get(key)
+        if not s or not s.get("n"):
+            continue
+        p50 = s["p50"]
+        p95 = s["p95"]
+        share = (p50 / cap_to_snap * 100.0) if cap_to_snap else 0.0
+        if key not in ("ws_out", "overlay_paint"):
+            attributed_p50 += p50
+        rows.append({
+            "stage": key, "what": human, "p50_ms": round(p50, 2),
+            "p95_ms": round(p95, 2), "pct_of_end_to_end": round(share, 1),
+            "n": s["n"],
+        })
+    unattributed = round(max(0.0, cap_to_snap - attributed_p50), 2)
+
+    payload = {
+        "label": label,
+        "kind": "loopback (server pipeline; recorded frames; no live camera, no browser paint)",
+        "source": args.source,
+        "machine": _machine_fingerprint(cfg),
+        "samples": e.get("samples"),
+        "end_to_end": {
+            "capture_to_snapshot_ms_p50": round(cap_to_snap, 2),
+            "frame_age_ms_p50": e.get("frame_age_ms_p50"),
+            "frame_age_ms_p95": e.get("frame_age_ms_p95"),
+            "frame_age_ms_max": e.get("frame_age_ms_max"),
+            "analysis_fps_p50": e.get("analysis_fps_p50"),
+            "drop_rate_mean": e.get("drop_rate_mean"),
+        },
+        "stages": rows,
+        "server_stages_attributed_p50_ms": round(attributed_p50, 2),
+        "unattributed_p50_ms": unattributed,
+        "notes": (
+            "Loopback: frames are pushed over a real /ws/ingest with a real capture "
+            "clock through the real server pipeline; the browser's getUserMedia, "
+            "the Web Worker canvas draw and the final overlay paint are NOT in this "
+            "path. worker_encode here is a cv2.imencode proxy. overlay_paint and "
+            "true capture->paint come from the fake-camera headless run "
+            "(results/browser_metrics_*.json) and real-camera values are the "
+            "developer's physical verification."
+        ),
+    }
+    (results_dir / f"latency_stages_{label}.json").write_text(
+        json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+    )
+
+    m = e.get("machine", {})  # noqa: F841
+    fp = payload["machine"]
+    L = [
+        f"# Latency stage attribution - `{label}`",
+        "",
+        f"**Kind:** {payload['kind']}",
+        "",
+        f"**Machine:** {fp.get('cpu', 'CPU n/a')} · {fp['logical_cores']} logical cores "
+        f"· {fp['ram_gb']} GB · {fp['platform']} · Python {fp['python']} · "
+        f"onnxruntime {fp.get('onnxruntime')} · providers {fp.get('available_providers')}",
+        "",
+        f"**Config:** provider `{fp['provider_config']}` · intra_op {fp['intra_op_threads']} "
+        f"· detector input {fp['detector_input_size']} · analysis {fp['analysis']}",
+        "",
+        f"**Samples:** {payload['samples']} analysed frames · "
+        f"end-to-end capture->snapshot p50 **{payload['end_to_end']['capture_to_snapshot_ms_p50']} ms** "
+        f"· frame_age p50/p95/max "
+        f"{payload['end_to_end']['frame_age_ms_p50']}/{payload['end_to_end']['frame_age_ms_p95']}/"
+        f"{payload['end_to_end']['frame_age_ms_max']} ms · analysis FPS "
+        f"{payload['end_to_end']['analysis_fps_p50']} · drop rate "
+        f"{payload['end_to_end']['drop_rate_mean']}",
+        "",
+        "| stage | what | p50 ms | p95 ms | % of end-to-end | n |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in rows:
+        L.append(
+            f"| `{r['stage']}` | {r['what']} | {r['p50_ms']} | {r['p95_ms']} "
+            f"| {r['pct_of_end_to_end']}% | {r['n']} |"
+        )
+    L += [
+        "",
+        f"Server stages attributed (sum of p50): **{payload['server_stages_attributed_p50_ms']} ms** "
+        f"of {payload['end_to_end']['capture_to_snapshot_ms_p50']} ms "
+        f"(unattributed / overlap: {payload['unattributed_p50_ms']} ms).",
+        "",
+        payload["notes"],
+        "",
+    ]
+    (results_dir / f"latency_stages_{label}.md").write_text("\n".join(L) + "\n", encoding="utf-8")
 
 
 def _md(o: dict) -> str:

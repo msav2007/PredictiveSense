@@ -97,6 +97,19 @@ function pct(arr, p) {
   return lo + 1 >= s.length ? s[s.length - 1] : s[lo] + (r - lo) * (s[lo + 1] - s[lo]);
 }
 
+/* Phase 8: pull the per-stage attribution keys the backend puts on the snapshot
+ * (`stage_*_ms`) into a compact object for the browser-metrics sample. */
+function stageBreakdown(m) {
+  const out = {};
+  for (const k of Object.keys(m || {})) {
+    if (k.startsWith("stage_") && typeof m[k] === "number") out[k] = m[k];
+  }
+  if (typeof m.capture_client_ts_ms === "number") {
+    out.capture_client_ts_ms = m.capture_client_ts_ms;
+  }
+  return out;
+}
+
 function currentBrowserSample() {
   const track = runtime.stream?.getVideoTracks()[0];
   const s = track ? track.getSettings() : {};
@@ -139,6 +152,12 @@ function currentBrowserSample() {
     backend_frame_age_ms_last: typeof snap.frame_age_ms === "number" ? snap.frame_age_ms : null,
     backend_frame_age_ms_p50: Number(pct(runtime.ageSamples, 50).toFixed(1)),
     backend_frame_age_ms_p95: Number(pct(runtime.ageSamples, 95).toFixed(1)),
+    // Phase 8: honest capture(drawImage)->overlay-paint age, pure client clock.
+    overlay_paint_age_ms_p50: Number(pct(runtime.paintAgeSamples, 50).toFixed(1)),
+    overlay_paint_age_ms_p95: Number(pct(runtime.paintAgeSamples, 95).toFixed(1)),
+    overlay_paint_age_samples: runtime.paintAgeSamples.length,
+    overlay_paint_ms: Number((runtime.lastPaintMs || 0).toFixed(2)),
+    stage_ms: stageBreakdown(m),
     backend_drop_rate: m.drop_rate ?? null,
     backend_ingest_bytes_per_s: m.ingest_bytes_per_s ?? null,
     backend_clock_offset_rtt_ms: m.clock_offset_rtt_ms ?? null,
