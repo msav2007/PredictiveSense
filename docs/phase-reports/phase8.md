@@ -169,6 +169,99 @@ server-side `frame_age_ms` — but the clean gain is on the server pipeline
 contention and a real camera, is where the end-to-end perceived improvement is
 confirmed (Part 2).
 
+### 2e. Post-emission investigation (follow-up) — where does the ~145 ms between
+snapshot emission and paint actually go?
+
+The 302.1→274.6 ms capture→paint figures above sit ~145–170 ms above the
+server-side capture→snapshot figures (§2d, §5) reported for the *same*
+"after all changes" configuration. Section 2b's original attribution charged
+that whole remainder to "the `/ws/state` broadcast poll + the page's
+`store.subscribe → draw` dispatch" — a guess, not a measurement, because
+nothing on the client was actually instrumented past `overlay_paint` (the
+capture→paint age itself) at the time that line was written. This section adds
+the missing instrumentation and reports what the gap is really made of.
+
+**Instrumentation added** (all additive, all bounded reservoirs matching the
+existing `paintAgeSamples` pattern):
+
+- `static/features/metrics.js` — `ws.onmessage` now stamps `performance.now()`
+  before and after `JSON.parse`, and again before/after `store.setSnapshot(snap)`
+  (which synchronously runs **every** `store.subscribe` callback: `shell.js`
+  render, `resizer.js`, `group.js`, and `overlay.js`'s `draw()`). Reported as
+  `ws_parse_ms` and `notify_dispatch_ms`.
+- `static/features/overlay.js` — `draw()` only *issues* canvas commands; it does
+  not prove the compositor presented them. A `requestAnimationFrame` scheduled
+  immediately after `draw()` returns measures the delay to the next animation
+  frame (the standard proxy for "time until this reaches the screen" — page
+  script has no way to observe the true compositor step). Reported as
+  `compositor_ms`.
+- `scripts/benchmark_capture_paint.py` — the page collector previously scanned
+  snapshot metric keys for the pattern `stage_<name>_ms` to build its table; the
+  broadcaster's hop is only ever exposed as the **lagged rolling** aggregates
+  `stage_ws_out_ms_p50` / `_p95` (`loop.py`), which end in `_p50`/`_p95`, not
+  `_ms` — so the collector's own filter silently excluded `ws_out` from every
+  capture→paint table this phase produced, including §2b and §2d. Fixed to read
+  it explicitly. The three new browser reservoirs are wired into the same
+  report.
+
+**Measured** (`scripts/benchmark_capture_paint.py --seconds 20`, this machine,
+two runs back-to-back, `dev.yaml` i.e. all Phase 8 changes applied):
+
+| stage | run 1 p50 / p95 (ms) | run 2 p50 / p95 (ms) |
+|---|---|---|
+| `ws_out` (broadcast emit→send) | 0.0 / 0.0 | 0.0 / 0.0 |
+| `ws_parse` (onmessage→JSON.parse done) | 0.0 / 0.1 | 0.0 / 0.1 |
+| `notify_dispatch` (store.notify→draw() return) | 0.6 / 0.9 | 0.7 / 0.9 |
+| `compositor` (draw() return→next rAF) | 4.35 / 14.8 | 4.9 / 14.59 |
+| capture→paint (whole thing) | 71.0 / 148.28 | 90.2 / 146.24 |
+
+(`results/latency_stages_post_emission_breakdown{,_run2}.json/md`.)
+
+**Finding: there is no missing ~145 ms stage.** Once `ws_out` is made visible
+and the three new client stages are measured, they total **~5 ms p50 / ~16 ms
+p95** — `ws_parse` and `notify_dispatch` are noise-level (JSON.parse on a
+snapshot this small, and the whole synchronous subscriber fan-out including
+overlay `draw()`, both sub-millisecond), and `compositor` is one-to-two vsync
+frames, exactly what scheduling a canvas paint on a 60 Hz display should cost.
+Two things follow:
+
+1. **`draw()` already runs on the snapshot event, not deferred to a later rAF.**
+   The fix this task's prompt hypothesized — "draw on the snapshot event rather
+   than waiting for the next rAF" — does not apply: `store.setSnapshot(snap)`
+   calls `notify()` synchronously inside `ws.onmessage`, which calls `draw()`
+   synchronously in the same call stack, measured at 0.6–0.9 ms total. There was
+   no scheduling gap to close. **No code change applied here** — the evidence
+   says none is justified.
+2. **The originally-quoted "~145 ms" gap is a same-run-condition mismatch, not a
+   real hop.** §2d's "before → after" capture→paint numbers came from the
+   fake-camera headless benchmark (browser + server + perception sharing this
+   machine's 18 threads), while the "after" capture→snapshot number it was
+   implicitly compared against came from the pure-Python loopback benchmark (no
+   browser, no Chromium, far less contention). Re-running the *same* headless
+   benchmark twice back-to-back on this machine already swings capture→paint
+   p50 from 71.0 to 90.2 ms and the underlying server stages by 2× (e.g.
+   `mailbox_dwell` 31.0→47.0 ms, `pose` 4/10 vs 5/9 frames) — this is the
+   "machine variance is large" limitation already logged in Part 3, not a new
+   finding, but it is precisely the mechanism that produced an apparent 145 ms
+   of "unattributed" latency when two different run conditions were subtracted
+   from each other. Attributed on one coherent run, the client-side tail is
+   small and the rest is the same server stages (`mailbox_dwell`, `detector`,
+   `pose`) already in the §2a/§2b tables, just under different contention.
+
+**Headless-compositing caveat (explicit, as required for this measurement).**
+The `compositor_ms` figure is measured on headless Chromium sharing this
+machine's threads with the server and the perception model — a busier and
+differently-scheduled environment than a real user's browser tab on an
+otherwise-idle machine. Headless Chromium's own compositor/GPU path also differs
+from a windowed browser (no real display surface, software compositing in most
+CI configurations). **This number should be read as an upper bound with an
+unknown sign of error, not a floor** — unlike the capture→paint `overlay_paint`
+figure elsewhere in this report (which the developer's physical verification
+treats as a floor because the fake camera has no sensor cost), headless
+compositing could plausibly be *slower* than a real windowed browser (extra
+contention) or *faster* (no real display presentation) than a real one; only the
+developer's physical, windowed-browser verification (Part 2) can settle which.
+
 ### 3. Baseline (before any Phase 8 optimization)
 
 | measure | value | command |
@@ -253,6 +346,25 @@ setting and is not latency-bound). Result file: `results/recognition_paths.md`.
 The pose model input is locked to 640 by the ONNX file, so only the detector
 changes. **Pending (developer):** confirm primary-tier recall holds on the
 OnePlus 720p clip.
+
+**Caveat on the evidence itself — 480 is provisional, not settled.** The 197 ==
+197 == 197 result is exactly the kind of number that looks like "input size
+doesn't matter" but can equally mean "this one clip cannot tell the difference."
+The one available clip (`data/raw/4918…/53f57e…webm`) was shot close-up in an
+indoor cabin scene, so its primary-tier objects occupy enough pixels that halving
+the detector's input resolution (640→480, a 0.75× linear scale) never pushed any
+of them below the detector's effective receptive/anchor floor — there is no
+distant or small-in-frame object in this footage for a resolution cut to lose.
+A clip is only a valid discriminator for this decision if it contains objects
+small enough that some are recovered at 640 and dropped at 480; this clip does
+not exercise that regime, so identical counts at 320/480/640 confirm nothing
+about small-object recall — they only show the sweep ran correctly. **`480` is
+therefore a provisional default, adopted on the latency evidence (−37% detector
+cost) but not yet cleared on the recall evidence**, pending a second clip
+containing distant/small objects (item 8 in Part 2, the OnePlus 720p clip, is
+one candidate but any clip with small-in-frame primary-tier objects would do).
+If that clip's 197-style count diverges between 480 and 640, `480` must be
+revisited before it is treated as validated rather than provisional.
 
 **Hardware-portable runtime (sections 13 / 14).** `perception.provider` accepts
 `auto | cpu | cuda | directml` (default **`auto`**; `dml` kept as a `directml`
@@ -349,18 +461,39 @@ Final run — `.venv/Scripts/python.exe -m pytest -q` (**all markers**, this
 machine, CPU-only, no GPU package):
 
 ```
-411 passed, 4 skipped, 1 failed  (249 s)
+412 passed, 4 skipped  (165 s)
 ```
 
 - **4 skipped:** 2 `cuda` (`test_cuda_provider.py` — no `CUDAExecutionProvider`
   in this ORT build, clean skip with the install hint), 2 models/hardware-gated.
-- **1 failed:** `test_object_batches_api.py::test_duplicate_detection_flags_within_batch_and_against_existing`
-  — a **pre-existing Phase 7 flake**, not a Phase 8 regression: it passes in
-  isolation and **13/13 in its own file**, touches only the dHash near-duplicate
-  path (no scheduling / perception / provider code), and flaked once in an
-  earlier full run before most of these changes. It is a threadpool / temp-dir
-  timing sensitivity under full-suite load.
-- Baseline was 374 passed / 2 skipped; the +37 passing are the Phase 8 tests.
+- **Change 6 — fixed the `test_duplicate_detection_flags_within_batch_and_against_existing`
+  flake (not a Phase 8 regression, but investigated and root-caused per the
+  follow-up request).** `api/object_batches.py` held `_PROPOSALS =
+  ThreadPoolExecutor(max_workers=1, ...)` as a **module-level global** — a
+  process-wide singleton shared by every `create_app()` instance for the life of
+  the interpreter, in direct violation of the "no global mutable state, no
+  singletons" architecture invariant. Every test file's batch-upload calls (this
+  file's 10+ tests, `test_studio_bulk_upload.py`, any future one) queued their
+  one-frame proposal jobs onto the **same single worker thread** for the whole
+  pytest session; under full-suite load a job submitted late in the run could
+  sit behind an unrelated test's backlog long enough that `_poll`'s fixed
+  2.5 s budget expired before this test's own job even started — exactly the
+  "threadpool / temp-dir timing sensitivity under full-suite load" this report
+  already suspected, now confirmed. **Fix:** the executor moved to
+  `app.state.batch_proposals_executor`, created in `create_app()` and shut down
+  (`wait=True`) in the lifespan's shutdown — one dedicated worker per app
+  instance, so no two tests (or two production app instances) ever share or
+  queue behind one. `object_batches.py` submits via
+  `request.app.state.batch_proposals_executor` instead of the module global.
+  Verified: `pytest -q tests/integration/test_object_batches_api.py` 13/13 x3
+  back-to-back, and `pytest -q` (full suite, all markers) **412 passed / 4
+  skipped, 0 failed** — the prior run's one failure is gone with no new
+  failures introduced. This was a real, previously-undiagnosed root cause, not
+  a re-run-until-green result; if it recurs the executor-sharing hypothesis is
+  falsified and quarantine (`@pytest.mark.flaky` / an explicit skip with a
+  linked issue) is the fallback documented here for that case.
+- Baseline was 374 passed / 2 skipped; the +38 passing are the Phase 8 tests
+  (+37 new tests, +1 from fixing the pre-existing flake).
 - `pytest -q -m models`: recorded determinism byte-identical **including** the
   new `PerceptionFrame` sidecar; provider resolution reports a concrete EP.
 - `pytest -q -m browser`: `test_phase8_responsiveness.py` — preview FPS
@@ -407,10 +540,10 @@ backpressured, no request/response — is the documented next step.
 pose cadence, broadcast, provider selection, input size, `PerceptionFrame`,
 preview independence), `docs/decisions.md` (one line per decision, each naming
 its result file), `docs/setup.md` (**new** — fresh-clone bootstrap for CPU and
-NVIDIA). **`CLAUDE.md` could not be updated: it is not in the repository** — it
-was removed in commit `a33a362 "Update"` and never re-added. The provider
-guidance it would have carried is in `docs/setup.md` §4 and
-`docs/decisions.md`.
+NVIDIA). `CLAUDE.md` was missing at the time (removed in commit `a33a362
+"Update"`, absent for all of Phase 8's own development) and has been **restored
+in this follow-up pass** — lean, module map + invariants + commands + phase
+status + prohibitions, detail deferred to `projectContext.md`.
 
 ## PART 2 — PHYSICALLY OBSERVED BY THE DEVELOPER (pending, section 20)
 
@@ -431,9 +564,14 @@ Not performed by the assistant. The developer must confirm, on real hardware:
 7. When the NVIDIA machine is available — repeat 1–6, record the active provider,
    compare CPU vs GPU side by side with both machine fingerprints shown
    (`scripts/benchmark_providers.py --provider cuda`; `pytest -m cuda`).
-8. Provide a OnePlus Nord 4 720p clip so the input-size decision (480) can be
-   confirmed to hold primary-tier recall on that camera's noise/blur; drop it in
-   `data/raw/` and re-run `scripts/benchmark_recognition_paths.py`.
+8. Provide a OnePlus Nord 4 720p clip **containing at least one distant or
+   small-in-frame primary-tier object** so the input-size decision (480, still
+   **provisional** — see Change 5's caveat) can actually be tested: the one clip
+   used so far returned identical 197/197/197 primary-tier counts at
+   320/480/640 because nothing in it is small enough to lose, which proves the
+   sweep ran, not that 480 is safe. Drop the clip in `data/raw/` and re-run
+   `scripts/benchmark_recognition_paths.py`; if the count diverges between 480
+   and 640 on the new clip, revisit the default before calling it validated.
 9. Confirm the reused (stale) pose at ~5 Hz fresh cadence is adequate for the
    scene — a stale skeleton is visibly dashed/dimmed and its age shows in
    Diagnostics.
@@ -464,9 +602,23 @@ Not performed by the assistant. The developer must confirm, on real hardware:
   are only made for the clean isolated signals (`stage_ws_out_ms`, the
   input-size primary-tier counts). Trend claims (pose cadence, staleness guard)
   are supported by the direction and magnitude across runs, not one number.
-- **`CLAUDE.md` update (section 21) not done** — the file is not in the
-  repository (removed in `a33a362`). Its intended provider guidance is in
-  `docs/setup.md` and `docs/decisions.md`.
+  §2e's re-run of the same headless benchmark twice is a second, direct
+  demonstration of this same variance (capture→paint p50 71.0 vs 90.2 ms).
+- **Headless compositor timing (§2e) is not a floor or a ceiling** — it runs on
+  the same contended 18 threads as the server and perception, and headless
+  Chromium's compositor path differs from a real windowed browser tab. Treat
+  `compositor_ms` as informative, not authoritative, until the developer's
+  physical verification (Part 2) measures it in a real browser.
+- **Input size `480` is provisional, not validated** (Change 5 caveat, §2 /
+  acceptance criteria): the one available clip has no distant/small primary-tier
+  object, so it cannot distinguish "480 is safe" from "this clip can't tell the
+  difference." Confirmation needs a clip with small-in-frame objects (Part 2,
+  item 8).
+- **`CLAUDE.md` update (section 21)** — done in this follow-up pass; restored at
+  the repo root (lean, <150 lines, module map + invariants + commands + phase
+  status + prohibitions, deferring detail to `projectContext.md`). It had been
+  removed in `a33a362 "Update"` and was absent for all of Phase 8's own
+  development.
 
 ## Acceptance criteria (section 22)
 
@@ -490,8 +642,11 @@ Not performed by the assistant. The developer must confirm, on real hardware:
   stale pose (dashed/dimmer — `test_phase8_responsiveness.py`).
 - [x] Input size **decided on evidence from the integrated-camera clip**
   including primary-tier detection counts + score distributions (`480`;
-  `results/recognition_paths.md`). OnePlus-clip confirmation: **pending
-  developer**.
+  `results/recognition_paths.md`) — **provisional**: this clip has no
+  distant/small-in-frame object, so identical 197/197/197 counts at
+  320/480/640 cannot discriminate a real recall loss from "the clip never
+  tested it" (see the caveat under Change 5). OnePlus-clip confirmation:
+  **pending developer**.
 - [x] `perception.provider` supports `auto | cpu | cuda | directml`; CPU is the
   default resolution and the fallback; an explicitly requested unavailable
   provider fails loudly (`test_provider_resolution.py`); the **actually active**
