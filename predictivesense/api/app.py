@@ -26,6 +26,7 @@ import mimetypes
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +150,17 @@ def create_app(
                     _LOG.error("analysis loop ended with error: %r", analysis_loop.error)
             if write_manifest:
                 _write_session_manifest(config, _app)
+            # Phase 7 bulk-upload proposals ran on a module-level global
+            # ThreadPoolExecutor shared by every app in the process (a
+            # singleton violating the "no global mutable state" invariant) -
+            # every test file's batches queued onto the same one worker for the
+            # whole pytest session, so a batch submitted late in a full run
+            # could sit behind unrelated tests' backlog and starve past a
+            # poll's timeout (the Phase 7/8 `test_duplicate_detection_flags...`
+            # flake, docs/phase-reports/phase8.md §7). Scoped to the app and
+            # drained on shutdown instead: each app gets its own worker and no
+            # test can queue behind another's.
+            _app.state.batch_proposals_executor.shutdown(wait=True)
 
     app = FastAPI(
         title="PredictiveSense",
@@ -178,6 +190,13 @@ def create_app(
         "clock_offset_s": 0.0,
         "clock_offset_rtt_ms": 0.0,
     }
+    # Phase 7 bulk-upload proposal worker: one dedicated thread per app (never a
+    # process-wide singleton - see the lifespan shutdown above). The proposal
+    # step reuses the single shared ONNX session, so detector calls must stay
+    # serialised (never one session per image, BLOCK 7).
+    app.state.batch_proposals_executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="batch-proposals"
+    )
 
     app.include_router(ingest_router.router)
     app.include_router(recorder_router.router)

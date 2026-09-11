@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -47,9 +46,9 @@ __all__ = ["router", "cleanup_stale_batches"]
 _LOG = get_logger(__name__)
 router = APIRouter()
 
-# One worker: the proposal step reuses the single shared ONNX session, so
-# detector calls are serialised (never one session per image, BLOCK 7).
-_PROPOSALS = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-proposals")
+# The one-worker proposal executor lives on app.state (created + shut down in
+# api/app.py's create_app/lifespan) - never a module-level singleton, so no two
+# apps (or two tests) ever share a worker or queue behind each other's jobs.
 # Coarse guard around every manifest read-modify-write so a background proposal
 # update and a concurrent PATCH cannot lose each other.
 _MANIFEST_LOCK = threading.Lock()
@@ -216,7 +215,9 @@ async def create_batch(
                 height=h,
             )
 
-    _PROPOSALS.submit(_run_proposals, request.app, object_id, batch_id)
+    request.app.state.batch_proposals_executor.submit(
+        _run_proposals, request.app, object_id, batch_id
+    )
 
     return {
         "batch_id": batch_id,
