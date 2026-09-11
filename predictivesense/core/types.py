@@ -20,6 +20,7 @@ from predictivesense.core.enums import Mode, RiskLevel, SourceKind, TrackStatus
 __all__ = [
     "BBox",
     "Frame",
+    "FrameTrace",
     "Detection",
     "Pose",
     "Track",
@@ -27,6 +28,7 @@ __all__ = [
     "RiskState",
     "Alert",
     "StateSnapshot",
+    "PerceptionFrame",
     "MailboxStats",
     "SourceInfo",
     "ClipManifest",
@@ -35,6 +37,67 @@ __all__ = [
 
 # (x1, y1, x2, y2) in pixels.
 BBox = tuple[float, float, float, float]
+
+
+class FrameTrace:
+    """Per-frame stage stamps for end-to-end latency attribution (Phase 8).
+
+    Deliberately **not** a frozen contract: it is a mutable scratch object that
+    travels attached to one :class:`Frame` and is written once by each pipeline
+    stage as that frame passes through it (worker header -> ingest receive ->
+    JPEG decode -> browser-source slot -> mailbox -> perception -> snapshot).
+    The analysis loop reads it once at snapshot emission, folds each stage delta
+    into the existing :class:`~predictivesense.telemetry.metrics.MetricRegistry`
+    samples, and freezes the result into an immutable
+    :class:`~predictivesense.telemetry.stages.FrameStages` record. Nothing here
+    is serialised over the wire; ``Frame.trace`` defaults to ``None`` so every
+    non-browser source (synthetic, device, file) is completely unaffected.
+
+    All ``*_ts`` values are ``time.monotonic()`` seconds on the server timeline.
+    All ``*_ms`` values are millisecond durations. ``capture_client_ms`` /
+    ``send_client_ms`` are the browser's own ``performance`` epoch-ms clock, kept
+    raw so a pure client-clock capture->paint age can be computed in the page
+    without any cross-clock subtraction.
+    """
+
+    __slots__ = (
+        "capture_client_ms",
+        "send_client_ms",
+        "worker_encode_ms",
+        "capture_ts",
+        "send_ts",
+        "recv_ts",
+        "decode_ms",
+        "src_enqueue_ts",
+        "src_dequeue_ts",
+        "mbox_enqueue_ts",
+        "mbox_dequeue_ts",
+        "detector_ms",
+        "pose_ms",
+        "pose_reused",
+        "policy_ms",
+        "snapshot_ts",
+        "frame_age_at_dequeue_ms",
+    )
+
+    def __init__(self) -> None:
+        self.capture_client_ms: float | None = None
+        self.send_client_ms: float | None = None
+        self.worker_encode_ms: float | None = None
+        self.capture_ts: float | None = None
+        self.send_ts: float | None = None
+        self.recv_ts: float | None = None
+        self.decode_ms: float | None = None
+        self.src_enqueue_ts: float | None = None
+        self.src_dequeue_ts: float | None = None
+        self.mbox_enqueue_ts: float | None = None
+        self.mbox_dequeue_ts: float | None = None
+        self.detector_ms: float | None = None
+        self.pose_ms: float | None = None
+        self.pose_reused: bool = False
+        self.policy_ms: float | None = None
+        self.snapshot_ts: float | None = None
+        self.frame_age_at_dequeue_ms: float | None = None
 
 
 class _Frozen(BaseModel):
@@ -58,6 +121,11 @@ class Frame(_Frozen):
     seq: int = Field(
         description="Sequence within the current source session; resets on reconnect."
     )
+    # Phase 8: optional per-frame latency-attribution scratch object. Mutable,
+    # never serialised, populated only on the browser-ingest path. Default None
+    # so synthetic / device / file sources and every existing construction site
+    # are unaffected. See docs/decisions.md (Phase 8).
+    trace: FrameTrace | None = Field(default=None, exclude=True, repr=False)
 
 
 class Detection(_Frozen):
@@ -175,6 +243,15 @@ class StateSnapshot(_Frozen):
     stale: bool = Field(
         description="True when no frame arrived within the configured threshold."
     )
+    pose_stale: bool = Field(
+        default=False,
+        description=(
+            "Phase 8: True when `poses` were reused from an earlier frame "
+            "(perception.pose_cadence). The overlay de-emphasises a stale "
+            "skeleton; `metrics.pose_age_ms` / `metrics.pose_src_frame_id` carry "
+            "its provenance. Additive - see docs/decisions.md."
+        ),
+    )
 
     def to_wire_json(self) -> str:
         """Serialise to the frozen wire format (compact JSON)."""
@@ -186,6 +263,48 @@ class StateSnapshot(_Frozen):
         """Parse the frozen wire format back into a snapshot."""
 
         return cls.model_validate_json(payload)
+
+
+class PerceptionFrame(_Frozen):
+    """One frame's complete perception output as a single immutable record
+    (Phase 8, section 16 - **tracking-ready output, no tracker**).
+
+    A future tracker / relationship layer consumes ``PerceptionFrame`` values
+    rather than reassembling parallel ``detections`` / ``poses`` lists off the
+    snapshot. Everything a tracker needs to key on is here: a stable per-frame
+    identity (``frame_id`` + monotonic ``seq``), the capture clock, the frame
+    pixel dimensions the boxes live in, the active model version and execution
+    provider, and - per detection - class name, raw class, confidence, box in
+    **original frame pixels**, ``policy_state`` and ``tier`` (already on
+    :class:`Detection`). ``detections`` and ``poses`` are ordered deterministically
+    (``-score``, then ``class_name``, then box top-left) so two runs agree.
+
+    Real-time (`pipeline/loop.py`) and recorded (`pipeline/recorded.py`) modes
+    build this with the identical helper, so the structure is byte-identical
+    between them. This adds no relationship field that nothing populates and
+    invents no track id - ``StateSnapshot.tracks`` stays empty.
+    """
+
+    frame_id: int
+    seq: int = Field(description="Monotonic frame sequence within the source session.")
+    capture_ts: float
+    width: int
+    height: int
+    model_version: str
+    provider: str = Field(description="ONNX Runtime EP actually in use this session.")
+    detections: tuple[Detection, ...] = ()
+    poses: tuple[Pose, ...] = ()
+    pose_stale: bool = Field(
+        default=False,
+        description="True when `poses` were reused from an earlier frame (section 9).",
+    )
+    pose_frame_id: int | None = Field(
+        default=None, description="frame_id the reused pose actually came from."
+    )
+    pose_capture_ts: float | None = None
+    pose_age_ms: float | None = Field(
+        default=None, description="capture_ts - pose_capture_ts, in ms, when reused."
+    )
 
 
 class MailboxStats(_Frozen):
@@ -234,9 +353,20 @@ class ClipManifest(_Frozen):
 
 
 class IngestHeader(_Frozen):
-    """The JSON header of one binary ``WS /ws/ingest`` analysis-frame message."""
+    """The JSON header of one binary ``WS /ws/ingest`` analysis-frame message.
+
+    Phase 8 added two **additive, optional** stage-attribution fields:
+    ``cap_ts_ms`` (the worker's ``performance`` epoch-ms clock at the moment it
+    drew the frame into the analysis canvas, i.e. the true capture instant) and
+    ``enc_ms`` (the worker's own JPEG encode duration). ``client_ts_ms`` keeps
+    its meaning - the epoch-ms clock at message send. Both new fields default to
+    ``None`` so an old worker, the framing tests, and every non-browser caller
+    are valid unchanged.
+    """
 
     client_ts_ms: float
     seq: int
     w: int
     h: int
+    cap_ts_ms: float | None = None
+    enc_ms: float | None = None

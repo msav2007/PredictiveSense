@@ -75,15 +75,19 @@ def looks_like_jpeg(payload: bytes) -> bool:
 def encode_ingest_message(header: IngestHeader, jpeg: bytes) -> bytes:
     """Frame ``header`` + ``jpeg`` into one binary message."""
 
-    body = json.dumps(
-        {
-            "client_ts_ms": header.client_ts_ms,
-            "seq": header.seq,
-            "w": header.w,
-            "h": header.h,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
+    fields: dict[str, float | int] = {
+        "client_ts_ms": header.client_ts_ms,
+        "seq": header.seq,
+        "w": header.w,
+        "h": header.h,
+    }
+    # Phase 8 stage-attribution fields: only sent when the worker supplies them,
+    # so an old worker and the framing round-trip tests are unaffected.
+    if header.cap_ts_ms is not None:
+        fields["cap_ts_ms"] = header.cap_ts_ms
+    if header.enc_ms is not None:
+        fields["enc_ms"] = header.enc_ms
+    body = json.dumps(fields, separators=(",", ":")).encode("utf-8")
     return struct.pack(">I", len(body)) + body + bytes(jpeg)
 
 
@@ -110,11 +114,15 @@ def decode_ingest_message(data: bytes, *, max_bytes: int) -> tuple[IngestHeader,
         raise FramingError("header JSON is not an object")
 
     try:
+        cap_ts_ms = raw.get("cap_ts_ms")
+        enc_ms = raw.get("enc_ms")
         header = IngestHeader(
             client_ts_ms=float(raw["client_ts_ms"]),
             seq=int(raw["seq"]),
             w=int(raw["w"]),
             h=int(raw["h"]),
+            cap_ts_ms=None if cap_ts_ms is None else float(cap_ts_ms),
+            enc_ms=None if enc_ms is None else float(enc_ms),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise FramingError(f"header fields invalid: {exc}") from exc

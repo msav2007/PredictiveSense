@@ -15,7 +15,7 @@
  */
 "use strict";
 
-import { runtime, emit } from "/static/features/runtime.js";
+import { runtime, emit, MAX_AGE_SAMPLES } from "/static/features/runtime.js";
 import { store } from "/static/ui/store.js";
 import { isLayerEnabled } from "/static/features/analysis-prefs.js";
 import { effectiveDetection, isPolicyView, onPolicyViewChange } from "/static/features/policy.js";
@@ -165,6 +165,7 @@ function displayRect() {
 
 function draw() {
   if (!ctx || !canvas) return;
+  const paintT0 = performance.now();
   const wrap = canvas.parentElement.parentElement || canvas.parentElement;
   ctx.clearRect(0, 0, wrap.clientWidth, wrap.clientHeight);
 
@@ -193,7 +194,10 @@ function draw() {
   if (isLayerEnabled("pose")) {
     const visThr =
       runtime.config?.perception?.pose?.keypoint_visibility_threshold ?? 0.3;
-    for (const p of snap.poses || []) drawPose(p, mapX, mapY, visThr);
+    // Phase 8: a reused (stale) skeleton is drawn dimmer and dashed so it is
+    // never mistaken for a fresh pose. Its age is in the Diagnostics readout.
+    const poseStale = !!snap.pose_stale;
+    for (const p of snap.poses || []) drawPose(p, mapX, mapY, visThr, poseStale);
   }
   ctx.restore();
 
@@ -203,6 +207,41 @@ function draw() {
     ctx.fillStyle = "#ffb454";
     ctx.fillText("STALE — last analysis shown, not current", rect.x + 8, rect.y + 18);
     ctx.restore();
+  }
+
+  // Phase 8 capture->paint attribution. `capture_client_ts_ms` is the worker's
+  // own drawImage epoch-ms clock echoed back through the snapshot, so this
+  // subtraction is a pure client-clock delta with no cross-clock error. Only
+  // meaningful for a fresh (non-stale) frame.
+  const drawEndTs = performance.now();
+  runtime.lastPaintMs = drawEndTs - paintT0;
+  const capMs = snap.metrics && snap.metrics.capture_client_ts_ms;
+  if (!snap.stale && typeof capMs === "number" && capMs > 0) {
+    const paintAge = performance.timeOrigin + performance.now() - capMs;
+    if (paintAge >= 0 && paintAge < 60000) {
+      runtime.paintAgeSamples.push(paintAge);
+      if (runtime.paintAgeSamples.length > MAX_AGE_SAMPLES) {
+        runtime.paintAgeSamples.shift();
+      }
+    }
+  }
+
+  // Phase 8 post-emission investigation: draw() only issues canvas commands -
+  // it does not prove the compositor has actually presented them. Schedule a
+  // requestAnimationFrame right after the synchronous draw work returns; a rAF
+  // callback runs immediately before the browser composites the next frame, so
+  // this delta is a standard proxy for "how long until this paint reaches the
+  // screen" (not the true compositor cost, which DevTools cannot expose to page
+  // script either). Skipped for a stale snapshot (nothing new to compose).
+  if (!snap.stale) {
+    requestAnimationFrame(() => {
+      const compositorMs = performance.now() - drawEndTs;
+      runtime.lastCompositorMs = compositorMs;
+      runtime.compositorMsSamples.push(compositorMs);
+      if (runtime.compositorMsSamples.length > MAX_AGE_SAMPLES) {
+        runtime.compositorMsSamples.shift();
+      }
+    });
   }
 }
 
@@ -280,27 +319,34 @@ function drawDetection(d, mapX, mapY, band, revealSuppressed) {
   ctx.restore();
 }
 
-function drawPose(p, mapX, mapY, visThr) {
+function drawPose(p, mapX, mapY, visThr, stale = false) {
   const kp = p.keypoints || [];
   ctx.save();
-  ctx.strokeStyle = "#4ade80";
+  // Fresh pose: solid bright green. Stale (reused) pose: dimmer, amber-grey,
+  // dashed edges - visually distinct from a current skeleton.
+  const edgeColour = stale ? "#a1a1aa" : "#4ade80";
+  const dimFresh = stale ? 0.45 : 0.9;
+  const dimLow = stale ? 0.12 : 0.25;
+  ctx.strokeStyle = edgeColour;
   ctx.lineWidth = 2;
+  if (stale) ctx.setLineDash([5, 4]);
   for (const [a, b] of SKELETON_EDGES) {
     const ka = kp[a];
     const kb = kp[b];
     if (!ka || !kb) continue;
     const va = ka[2] >= visThr;
     const vb = kb[2] >= visThr;
-    ctx.globalAlpha = va && vb ? 0.9 : 0.25;
+    ctx.globalAlpha = va && vb ? dimFresh : dimLow;
     ctx.beginPath();
     ctx.moveTo(mapX(ka[0]), mapY(ka[1]));
     ctx.lineTo(mapX(kb[0]), mapY(kb[1]));
     ctx.stroke();
   }
+  ctx.setLineDash([]);
   for (const k of kp) {
     const vis = k[2] >= visThr;
-    ctx.globalAlpha = vis ? 1 : 0.3;
-    ctx.fillStyle = vis ? "#bbf7d0" : "#6b7280";
+    ctx.globalAlpha = (vis ? 1 : 0.3) * (stale ? 0.5 : 1);
+    ctx.fillStyle = vis ? (stale ? "#d4d4d8" : "#bbf7d0") : "#6b7280";
     ctx.beginPath();
     ctx.arc(mapX(k[0]), mapY(k[1]), vis ? 3 : 2, 0, Math.PI * 2);
     ctx.fill();

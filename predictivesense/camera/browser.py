@@ -25,7 +25,7 @@ import numpy as np
 
 from predictivesense.camera.framing import ClockOffset, capture_ts_seconds
 from predictivesense.core.enums import SourceKind
-from predictivesense.core.types import Frame, IngestHeader, SourceInfo
+from predictivesense.core.types import Frame, FrameTrace, IngestHeader, SourceInfo
 from predictivesense.logging_setup import get_logger
 
 __all__ = ["BrowserSource"]
@@ -88,8 +88,15 @@ class BrowserSource:
         with self._lock:
             self._malformed += 1
 
-    def submit(self, header: IngestHeader, jpeg: bytes) -> None:
-        """Decode one framed JPEG and store it newest-wins. Never raises."""
+    def submit(
+        self, header: IngestHeader, jpeg: bytes, *, recv_ts: float | None = None
+    ) -> None:
+        """Decode one framed JPEG and store it newest-wins. Never raises.
+
+        ``recv_ts`` is the ``time.monotonic()`` reading taken by the ingest
+        handler the instant the WebSocket message arrived (Phase 8 stage
+        attribution); ``None`` from any other caller.
+        """
 
         t0 = time.perf_counter()
         try:
@@ -114,6 +121,17 @@ class BrowserSource:
             capture_ts = capture_ts_seconds(header.client_ts_ms, offset_s)
             self._frame_id += 1
             self._seq += 1
+            trace = FrameTrace()
+            trace.send_client_ms = header.client_ts_ms
+            trace.send_ts = capture_ts
+            trace.capture_client_ms = (
+                header.cap_ts_ms if header.cap_ts_ms is not None else header.client_ts_ms
+            )
+            trace.capture_ts = capture_ts_seconds(trace.capture_client_ms, offset_s)
+            trace.worker_encode_ms = header.enc_ms
+            trace.recv_ts = recv_ts
+            trace.decode_ms = decode_ms
+            trace.src_enqueue_ts = now
             frame = Frame(
                 frame_id=self._frame_id,
                 capture_ts=capture_ts,
@@ -122,6 +140,7 @@ class BrowserSource:
                 height=height,
                 source_id=self._source_id,
                 seq=self._seq,
+                trace=trace,
             )
             if self._slot is not None:
                 self._dropped += 1
@@ -153,6 +172,8 @@ class BrowserSource:
             self._frame_ready.clear()
             if not self._running:
                 return None
+        if frame is not None and frame.trace is not None:
+            frame.trace.src_dequeue_ts = time.monotonic()
         return frame
 
     @property

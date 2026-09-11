@@ -908,3 +908,127 @@ state, risk, alert policy, TTS, Scene Snapshot Studio, session memory - none
 started, none placeheld. `StateSnapshot.tracks` is still `[]`. Recognition
 behaviour, the recognition policy, the vocabulary tiers, the evaluation dataset
 and the model registry are untouched.
+
+# Phase 8 - perception responsiveness, hardware-portable runtime, tracking-ready output
+
+Latency, portability and output shape. No custom-model training, no tracker, no
+relationship engine, no risk, no voice, no UI redesign. Full numbers +
+before/after per change: `docs/phase-reports/phase8.md`; decisions:
+`docs/decisions.md`; bootstrap: `docs/setup.md`.
+
+## End-to-end latency attribution
+
+One analysed frame's journey is stamped stage by stage on a mutable
+`Frame.trace` (`core/types.FrameTrace`, default `None`, browser-ingest path
+only, never serialised) and folded into the **existing** `MetricRegistry` by
+`telemetry/stages.record_stages` (`stage_<name>_ms` samples + an immutable
+`FrameStages` per frame in a bounded ring - `loop.frame_stages()`). No parallel
+metrics system. `scripts/benchmark_latency.py --label` writes
+`results/latency_stages_<label>.{json,md}`; `scripts/benchmark_capture_paint.py`
+(Playwright + fake camera) measures the two stages the server trace cannot see -
+real Web Worker encode and real capture->overlay-paint (a pure client-clock
+delta against `capture_client_ts_ms`). Measured bottleneck: inference (detector
+~42 % + pose ~28 %), then `mailbox_dwell` ~21 %; transport ~3 %.
+
+## Scheduling
+
+`consumer.scheduler` = `timer` (default) | `completion`. `timer` wakes at
+`consumer.sample_rate_hz`; when inference exceeds the tick its catch-up clamp
+makes it pick up a frame as soon as the previous iteration finishes.
+`completion` (`pipeline/scheduler.run_completion_consumer`) blocks on
+`LatestFrameMailbox.get(block=True)` - a `threading.Condition.wait`, never a
+spin - with a `consumer.max_analysis_rate_hz` ceiling. Measured equal on this
+machine (inference-bound); `timer` stays the default. `LatestFrameMailbox`
+gained the blocking `get` (default `get()` unchanged); depth is still 0 or 1.
+
+## Staleness policy
+
+`analysis.max_frame_age_ms` (0 = off; `dev.yaml` = 180). A frame older than this
+at mailbox dequeue is dropped and counted `dropped_stale`; the loop takes the
+next fresher frame. Derived from the measured `frame_age_at_dequeue` p95
+(~110 ms) so it never fires on steady jitter but bounds the tail on a hitch. One
+reconciling frame-counter set is on every snapshot (`frames_decoded`,
+`frames_analysed`, `dropped_browser_buffer`, `dropped_mailbox`, `dropped_stale`,
+`frames_in_flight`); the identity `decoded == analysed + dropped_overwrite +
+dropped_stale + in_flight` is exact at a drained point. **Two single-slot
+buffers in series are kept** (`BrowserSource._slot` -> producer -> mailbox):
+measured `src_buffer_dwell` p50/p95 = 0.0/0.0 ms - the first buffer decouples the
+async WS-decode thread from the analysis producer thread for zero latency cost.
+
+## Pose cadence
+
+`perception.pose_cadence` = `every_frame` | `every_n:<int>` | `interval_ms:<float>`
+(+ `pose_max_reuse_ms`); `dev.yaml` = `every_n:2`, `eval.yaml` = `every_frame`.
+On a frame where pose is not due, the last pose is reused as the **same
+immutable `Pose` objects** (single owner: the consumer thread; no lock) carrying
+its own `frame_id` / `capture_ts` / `age_ms` and `StateSnapshot.pose_stale =
+true`; the overlay draws a stale skeleton dimmer, amber-grey and dashed; beyond
+`pose_max_reuse_ms` the pose is dropped, not shown wrong. Cadence decisions use
+frame **capture** time, not wall time, so recorded mode stays byte-deterministic.
+Detection never waits on pose on a reused frame; a pose worker thread was not
+added (Phase 2 measured two ORT sessions contend badly). Measured `every_n:2`:
+cap->snapshot p50 225 -> 138 ms, analysis FPS 6 -> 11, drop rate 0.4 -> 0.02.
+
+## `/ws/state` broadcast
+
+`api/broadcast.Broadcaster.publish()` now wakes every client via
+`loop.call_soon_threadsafe(event.set)` (analysis thread never awaits, never
+touches a socket); each client blocks on an `asyncio.Event` with a `2x rate_hz`
+send-rate ceiling and a `period` fallback. Replaced a fixed
+`asyncio.sleep(1/rate_hz)` poll that added up to one poll period after emission.
+Measured `stage_ws_out_ms` p50 46 -> 0 ms. Perceived latency is reported as
+**capture->paint** (fake-camera headless p50 ~278-302 ms), not the server-side
+capture->emission `frame_age_ms` (~225 ms) which understates it.
+
+## Provider selection
+
+`perception.provider` = `auto | cpu | cuda | directml` (default `auto`).
+`perception/runtime.resolve_provider`: `auto` tries `cuda -> directml -> cpu`,
+first EP present in `onnxruntime.get_available_providers()`, always ends at CPU,
+logs which + why. An explicitly named absent provider is a **loud**
+`ProviderUnavailableError` (names the extra, the CUDA/cuDNN coupling, and `auto`
+as the escape hatch) - never a silent CPU fallback; a CUDA EP that inits on CPU
+raises a `RuntimeError` naming the likely version mismatch. The **active** EP
+(from the live session's `get_providers()`, not config) is in `GET /api/runtime`,
+Diagnostics ("active EP" row + a Phase 8 stage/counter/pose grid), the session
+manifest (`extra.perception` + `extra.machine` fingerprint) and every
+`benchmark_providers.py` result file. `pyproject.toml` has mutually-exclusive
+`[cpu]` / `[cuda]` extras (`onnxruntime` vs `onnxruntime-gpu`, same module name);
+`onnxruntime` is out of the base deps. `docs/setup.md` bootstraps a fresh clone
+on either machine. CUDA/DirectML were not *executed* here (this ORT build has CPU
++ Azure only); `cuda`-marked tests skip cleanly and run on the NVIDIA machine.
+
+## Detector input size
+
+`perception.detector.input_size` = 480 (`dev.yaml`; `eval.yaml` stays 640).
+320/480/640 swept with primary-tier detection counts + score percentiles
+(`results/recognition_paths.md`): primary-tier count identical (197) at every
+size, score distribution flat; only non-primary detections rise as size falls
+(policy-handled). Detector p50 640 -> 73 ms, 480 -> 46 ms. The pose model input
+is ONNX-locked to 640.
+
+## Tracking-ready output - `PerceptionFrame`
+
+`core/types.PerceptionFrame`: one frame's perception output as a single
+immutable record (`frame_id`, monotonic `seq`, `capture_ts`, frame `width`/
+`height`, `model_version`, active `provider`, deterministically ordered
+`detections` / `poses` - already carrying box-in-original-pixels,
+`raw_class_name`, `policy_state`, `tier` - and reused-pose provenance). A
+**pipeline-internal** contract built by one shared helper
+(`pipeline/perception_frame.build_perception_frame`): the loop exposes
+`perception_frames()`; the recorded driver writes
+`results/recorded_<run_id>.frames.jsonl` (a **sidecar** - the main recorded JSONL
+and its byte-determinism are unchanged). Not on the `/ws/state` wire.
+`StateSnapshot.tracks` is still `[]`; there is **no `predictivesense/tracking/`**
+and no track ids. A future person<->object relationship layer has, from this
+record: person and object boxes in the same pixel space, pose keypoints with
+their own timestamp + staleness, and a per-frame identity a tracker can key on.
+
+## Preview independence (unchanged, re-verified)
+
+A stalled detector still cannot affect the `<video>` preview, the UI, the
+Studio, or browser event processing. The worker-based async design is untouched;
+no synchronous inference on the main thread; preview is never reconnected to
+analysis completion. Re-verified by `tests/integration/test_preview_independence.py`
+and `tests/browser/test_phase8_responsiveness.py` (preview FPS recorded during a
+deliberate 3 s `POST /api/debug/stall`).

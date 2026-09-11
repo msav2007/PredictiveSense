@@ -656,3 +656,121 @@ state, risk, or voice; no training or fine-tuning.
   `objects/proposals.py` are stdlib + numpy only (like the rest of
   `objects/`); `cv2` stays confined to `camera/` + `perception/` (the batch API
   decodes/encodes via `camera/_opencv.py`, as the camera route already does).
+
+## Phase 8 - perception responsiveness, hardware-portable runtime, tracking-ready output (2026-09-10)
+
+Every latency decision below carries its measurement (`docs/phase-reports/phase8.md`
+"Measured", `results/latency_stages_*.json`). Machine: Intel Core Ultra 5 125H,
+18 logical cores, CPU provider, `onnxruntime` 1.24.4 (no CUDA / DirectML EP in
+this build).
+
+### Contracts (additive; Phase 0 rule - no rename, no reshape)
+
+- **`core/types.py` `Frame.trace: FrameTrace | None = None`** - a mutable,
+  never-serialised per-frame stamp carrier for end-to-end latency attribution.
+  Default `None`; only the browser-ingest path populates it, so synthetic /
+  device / file sources and every existing construction site are unchanged.
+- **`IngestHeader.cap_ts_ms` / `enc_ms`** (optional, default `None`) - the
+  worker's true capture instant (drawImage) and its real JPEG encode duration.
+  Framing round-trips them only when present.
+- **`StateSnapshot.pose_stale: bool = False`** - poses were reused from an
+  earlier frame (`perception.pose_cadence`). `metrics` also gains `stage_*_ms`
+  keys, `capture_client_ts_ms`, `dropped_stale`, `frames_decoded` /
+  `frames_analysed` / `dropped_browser_buffer` / `dropped_mailbox` /
+  `frames_in_flight`, `pose_reused` / `pose_age_ms` / `pose_src_frame_id`
+  (keys only; the map stays `dict[str, float]`).
+- **`PerceptionFrame`** (new frozen contract) - one frame's complete perception
+  output as a single immutable record: `frame_id`, monotonic `seq`, `capture_ts`,
+  frame `width`/`height`, `model_version`, active `provider`, deterministically
+  ordered `detections` / `poses` (already carrying box-in-original-pixels,
+  `raw_class_name`, `policy_state`, `tier`), and reused-pose provenance. A
+  **pipeline-internal** contract: the loop exposes `perception_frames()`; the
+  recorded driver writes `results/recorded_<run_id>.frames.jsonl` (a **sidecar** -
+  the main recorded JSONL line shape and its byte-determinism guarantee are
+  unchanged). Not added to the `/ws/state` wire. `StateSnapshot.tracks` stays
+  `[]`; no `predictivesense/tracking/` package; no track ids.
+- **`PerceptionResult`** (internal) gains `pose_reused` / `pose_frame_id` /
+  `pose_capture_ts` / `pose_age_ms`.
+
+### Instrumentation (before any optimization - section 5/6)
+
+- **One frame's journey is stamped stage by stage on `FrameTrace` and folded
+  into the existing `MetricRegistry`** (`telemetry/stages.py::record_stages` ->
+  `stage_<name>_ms` `Samples`; an immutable `FrameStages` per frame kept in a
+  bounded ring). **No parallel metrics system.** `scripts/benchmark_latency.py
+  --label` writes `results/latency_stages_<label>.{json,md}` (per-stage p50/p95,
+  % of end-to-end, machine fingerprint). `scripts/benchmark_capture_paint.py`
+  (new; Playwright + `--use-fake-device-for-media-stream`) measures the two
+  stages the server trace cannot see - real Web Worker encode and real
+  capture->overlay-paint (a pure client-clock delta against
+  `capture_client_ts_ms`). Real-camera absolute capture->paint and the OnePlus
+  virtual-camera transport/jitter remain the developer's physical verification.
+- **Attribution result:** the bottleneck is inference (detector ~42 % + pose
+  ~28 % of end-to-end) then `mailbox_dwell` ~21 %; transport (worker encode + WS
+  + decode) ~3 %. The second single-slot buffer (`BrowserSource._slot`) measures
+  **0.0 ms** dwell - **kept**: it decouples the async WS-decode thread from the
+  analysis producer thread for zero latency cost.
+
+### Optimizations (kept / rejected on evidence - one change at a time)
+
+- **Broadcast push-on-publish** (`api/broadcast.py`). Replaced the fixed
+  `asyncio.sleep(1/rate_hz)` `/ws/state` poll with `Broadcaster.publish()` waking
+  each client via `loop.call_soon_threadsafe`; client blocks on an
+  `asyncio.Event` with a `2x rate_hz` send-rate ceiling (no busy wait) and a
+  `period` fallback. `publish()` still O(1) and never touches a socket.
+  **Measured `stage_ws_out_ms` p50 46.0 -> 0.0 ms, p95 93.5 -> 0.0 ms**
+  (`results/latency_stages_{before,after}_pushpub.json`). **Kept.**
+- **Completion-driven scheduling** (`consumer.scheduler`, `pipeline/scheduler.py`).
+  Shipped and unit-tested (blocks on `LatestFrameMailbox.get(block=True)` - a
+  `Condition.wait`, not a spin - with a `max_analysis_rate_hz` ceiling).
+  **Default stays `timer`:** loopback measured `timer == completion`
+  (cap->snapshot 251.8 vs 252.3 ms; `mailbox_dwell` 47/94 ms both). On this
+  machine inference (~130-225 ms) exceeds the 50 ms tick, so the timer's
+  catch-up clamp already picks up a frame the instant the previous iteration
+  ends. Rejected as default *on evidence* (section 7).
+- **Staleness guard** `analysis.max_frame_age_ms` (0 = off). **Set to 180 ms in
+  `dev.yaml`**, derived from `frame_age_at_dequeue` p50 ~60 / p95 ~110 ms - never
+  fires on steady jitter (`dropped_stale` = 0 in the loopback) but drops a frame
+  once the consumer is ~2 inference cycles behind. `tests/integration/
+  test_slow_detector_bounds_latency.py` proves it bounds the end-to-end age
+  under a slow detector without unbounded growth. One reconciling frame-counter
+  set is exposed and asserted exact at a drained point
+  (`captured == analysed + dropped_overwrite + dropped_stale + in_flight`).
+- **Pose cadence** `perception.pose_cadence` (`every_frame` | `every_n:<int>` |
+  `interval_ms:<float>`) + `pose_max_reuse_ms`. **Set to `every_n:2` in
+  `dev.yaml`.** A frame without a fresh pose reuses the last one as the **same
+  immutable `Pose` objects** (single-owner consumer thread; no lock) with its own
+  `frame_id`/`capture_ts`/`age_ms` and `pose_stale=true`; the overlay draws a
+  stale skeleton dimmer/dashed; beyond `pose_max_reuse_ms` the pose is dropped,
+  not shown wrong. Cadence uses frame capture time, not wall time, so recorded
+  mode stays byte-deterministic. Measured `every_n:2`: cap->snapshot p50
+  **225 -> 138 ms**, analysis FPS **6 -> 11.1**, drop rate **0.4 -> 0.016**, pose
+  present on every snapshot. A pose worker thread was **not** added (Phase 2
+  measured two ORT sessions contend badly). `eval.yaml` keeps `every_frame` -
+  the evaluation harness must run pose on every frame.
+- **Detector input size** `perception.detector.input_size` - **`dev.yaml` -> 480**
+  (`eval.yaml` stays 640). `scripts/benchmark_recognition_paths.py` swept
+  320 / 480 / 640 on the integrated-camera clip with primary-tier detection
+  counts + score percentiles (`results/recognition_paths.md`): the primary-tier
+  (safety-relevant) detection count is **identical (197) at every size** and the
+  score distribution is flat (p50 0.90-0.91); only *non-primary* detections rise
+  as size falls, and the policy already handles those. Detector p50:
+  640 -> 73 ms, 480 -> 46 ms, 320 -> 25 ms. 480 halves detector cost with zero
+  primary loss; 320's extra gain is small and ~10x's the non-primary noise. The
+  pose model input is ONNX-locked to 640, so only the detector changes. The
+  evaluation harness (`eval.yaml`) keeps 640 - most sensitive, not latency-bound.
+  Developer confirms primary recall on the OnePlus 720p clip (phase 8 report
+  Part 2).
+
+### Hardware-portable runtime
+
+- See the Phase 8 report's provider section: `perception.provider` accepts
+  `auto | cpu | cuda | directml`, default `auto`; `auto` picks the first
+  available EP in a documented order and always falls back to CPU, logging which
+  and why; an explicitly requested unavailable provider is a **loud** failure.
+  The **actually active** EP is reported (from the live session's
+  `get_providers()`) in Diagnostics, the session manifest and every result file.
+  `pyproject.toml` optional extras `[cpu]` / `[cuda]`; `docs/setup.md` covers a
+  fresh clone on either machine. CUDA / DirectML could not be *executed* in this
+  environment (`onnxruntime` build exposes CPU + Azure only); the `cuda`-marked
+  tests skip cleanly and are ready for the developer's NVIDIA machine.

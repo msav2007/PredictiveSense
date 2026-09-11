@@ -48,14 +48,31 @@ function connectStateSocket() {
     store.setStatus("error");
   };
   ws.onmessage = (ev) => {
+    // Phase 8 post-emission investigation: measure JSON.parse and the
+    // synchronous store.notify() fan-out (shell render + every group update +
+    // overlay draw()) that this one onmessage call triggers - see runtime.js.
+    const tReceived = performance.now();
     let snap;
     try {
       snap = JSON.parse(ev.data);
     } catch {
       return;
     }
+    const tParsed = performance.now();
+    if (!snap.stale) {
+      const parseMs = tParsed - tReceived;
+      runtime.lastParseMs = parseMs;
+      runtime.parseMsSamples.push(parseMs);
+      if (runtime.parseMsSamples.length > MAX_AGE_SAMPLES) runtime.parseMsSamples.shift();
+    }
     runtime.lastSnapshot = snap;
     store.setSnapshot(snap);
+    const notifyMs = performance.now() - tParsed;
+    if (!snap.stale) {
+      runtime.lastNotifyMs = notifyMs;
+      runtime.notifyMsSamples.push(notifyMs);
+      if (runtime.notifyMsSamples.length > MAX_AGE_SAMPLES) runtime.notifyMsSamples.shift();
+    }
     if (runtime.owner !== "backend") {
       store.setStatus(snap.stale ? "degraded" : "running");
     }
@@ -95,6 +112,19 @@ function pct(arr, p) {
   const r = (p / 100) * (s.length - 1);
   const lo = Math.floor(r);
   return lo + 1 >= s.length ? s[s.length - 1] : s[lo] + (r - lo) * (s[lo + 1] - s[lo]);
+}
+
+/* Phase 8: pull the per-stage attribution keys the backend puts on the snapshot
+ * (`stage_*_ms`) into a compact object for the browser-metrics sample. */
+function stageBreakdown(m) {
+  const out = {};
+  for (const k of Object.keys(m || {})) {
+    if (k.startsWith("stage_") && typeof m[k] === "number") out[k] = m[k];
+  }
+  if (typeof m.capture_client_ts_ms === "number") {
+    out.capture_client_ts_ms = m.capture_client_ts_ms;
+  }
+  return out;
 }
 
 function currentBrowserSample() {
@@ -139,6 +169,20 @@ function currentBrowserSample() {
     backend_frame_age_ms_last: typeof snap.frame_age_ms === "number" ? snap.frame_age_ms : null,
     backend_frame_age_ms_p50: Number(pct(runtime.ageSamples, 50).toFixed(1)),
     backend_frame_age_ms_p95: Number(pct(runtime.ageSamples, 95).toFixed(1)),
+    // Phase 8: honest capture(drawImage)->overlay-paint age, pure client clock.
+    overlay_paint_age_ms_p50: Number(pct(runtime.paintAgeSamples, 50).toFixed(1)),
+    overlay_paint_age_ms_p95: Number(pct(runtime.paintAgeSamples, 95).toFixed(1)),
+    overlay_paint_age_samples: runtime.paintAgeSamples.length,
+    overlay_paint_ms: Number((runtime.lastPaintMs || 0).toFixed(2)),
+    // Phase 8 post-emission investigation: WS receive -> JSON.parse -> draw
+    // dispatch -> compositor proxy, see runtime.js / overlay.js.
+    ws_parse_ms_p50: Number(pct(runtime.parseMsSamples, 50).toFixed(2)),
+    ws_parse_ms_p95: Number(pct(runtime.parseMsSamples, 95).toFixed(2)),
+    notify_dispatch_ms_p50: Number(pct(runtime.notifyMsSamples, 50).toFixed(2)),
+    notify_dispatch_ms_p95: Number(pct(runtime.notifyMsSamples, 95).toFixed(2)),
+    compositor_ms_p50: Number(pct(runtime.compositorMsSamples, 50).toFixed(2)),
+    compositor_ms_p95: Number(pct(runtime.compositorMsSamples, 95).toFixed(2)),
+    stage_ms: stageBreakdown(m),
     backend_drop_rate: m.drop_rate ?? null,
     backend_ingest_bytes_per_s: m.ingest_bytes_per_s ?? null,
     backend_clock_offset_rtt_ms: m.clock_offset_rtt_ms ?? null,

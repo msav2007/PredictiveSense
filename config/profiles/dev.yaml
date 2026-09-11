@@ -15,10 +15,26 @@ source:
 consumer:
   sample_rate_hz: 20.0
   stale_after_ms: 500.0
+  # Phase 8 (docs/phase-reports/phase8.md, docs/decisions.md): "completion" is
+  # shipped and tested but the default stays "timer" - on this machine inference
+  # (~130-225 ms) exceeds the 50 ms tick, so the timer's catch-up clamp already
+  # picks up a frame the instant the previous iteration finishes; the loopback
+  # measured timer == completion. max_analysis_rate_hz is the completion-mode
+  # CPU ceiling.
+  scheduler: timer
+  max_analysis_rate_hz: 30.0
 
 broadcast:
   rate_hz: 10.0
   client_send_timeout_s: 5.0
+
+# Phase 8 staleness guard. Derived from results/latency_stages_*.json: the frame
+# age at mailbox dequeue is p50 ~60 ms / p95 ~110 ms in steady state, so 180 ms
+# never fires on normal jitter but drops a frame once the consumer has fallen
+# ~2 inference cycles behind (a hitch) - keeping the overlay's world fresh
+# instead of analysing a scene that has passed. 0 disables it.
+analysis:
+  max_frame_age_ms: 180.0
 
 api:
   host: 127.0.0.1
@@ -77,24 +93,41 @@ video:
 perception:
   detection_enabled: true
   pose_enabled: true
-  # pose_every_n stays 1: the input-size sweep (docs/phase-reports/phase2.md
-  # "Measured") shows detector+pose fit the 10 fps / 100 ms budget at input 640
-  # on CPU with headroom. Raise only if a slower machine needs it.
-  pose_every_n: 1
+  pose_every_n: 1   # legacy knob; superseded by pose_cadence below
+  # Phase 8 (section 9, docs/decisions.md): pose is decoupled from detection.
+  # Loopback measured cap->snapshot p50 ~225 -> 138 ms, analysis FPS ~6 -> 11,
+  # drop rate ~0.4 -> 0.02 at every_n:2 with NO loss of pose - a frame without a
+  # fresh pose reuses the last one as an immutable value object carrying its own
+  # frame_id / capture_ts / age_ms and stale=true (overlay de-emphasises it),
+  # bounded by pose_max_reuse_ms. Cadence decisions use frame capture time, so
+  # recorded mode stays byte-deterministic.
+  pose_cadence: "every_n:2"
+  pose_max_reuse_ms: 500.0
   # ORT intra-op threads per session. Auto (all 18 logical cores) over-subscribes
   # with two sessions + the loop threads: measured combined p50 collapsed to
   # ~440 ms. 6 is the measured knee (~90-110 ms combined). See phase2.md.
   intra_op_threads: 6
-  # Provider chosen from results/providers_cpu.json vs results/providers_dml.json
-  # (docs/phase-reports/phase2.md "Measured", docs/decisions.md). DirectML on the
-  # Arc iGPU AGREES with CPU numerically (class-agreement 1.0, mean |box diff|
-  # 0.0 px) but is ~2.2x SLOWER for these nano models (combined p50 216 ms vs 96 ms) -
-  # the tiny kernels never saturate the GPU while the 14-core CPU does.
-  # Default: cpu.
-  provider: cpu
+  # Phase 8: never hard-coded. "auto" tries cuda -> directml -> cpu and takes the
+  # first available EP, always falling back to CPU and logging which + why. On
+  # this CPU-only machine that resolves to CPU (measured best here: DirectML on
+  # the Arc iGPU agrees numerically but is ~2.2x slower for these nano models -
+  # results/providers_cpu.json vs providers_dml.json). On the NVIDIA laptop the
+  # same config picks CUDA. An explicit `provider: cuda` that is unavailable is a
+  # LOUD failure, not a silent CPU fallback. The EP actually in use is reported
+  # in Diagnostics, the session manifest and every result file.
+  provider: auto
   detector:
     model_path: models/yolo11n.onnx
-    input_size: 640            # sweep {320,480,640}: 640 keeps small objects; see report
+    # Phase 8 §10 (results/recognition_paths.md, docs/decisions.md): 320/480/640
+    # swept on the integrated-camera clip. Primary-tier (safety-relevant)
+    # detection count is IDENTICAL at all three (197 = 197 = 197) and the
+    # primary-tier score distribution is flat (p50 0.90-0.91). Only spurious
+    # non-primary detections rise as size falls (the policy handles those).
+    # Detector p50: 640 -> 73 ms, 480 -> 46 ms, 320 -> 25 ms. 480 halves the
+    # detector cost with zero primary-tier loss; 320's extra latency gain over
+    # 480 is small and it ~10x's the non-primary noise vs 640. Default: 480.
+    # (The developer confirms primary recall holds on the OnePlus 720p clip.)
+    input_size: 480
     nms_iou: 0.5
     default_conf: 0.35
     class_thresholds: {}       # per-class overrides go here once the audit verdicts land

@@ -21,12 +21,30 @@ dependencies = [
     "psutil==6.1.1",
     "opencv-python==4.10.0.84",
     "python-multipart==0.0.20",
-    # Phase 2 perception. CPU build only in the main .venv; the DirectML build
-    # (onnxruntime-directml, same module name) is installed ONLY in .venv-dml.
-    "onnxruntime==1.24.4",
+    # NOTE: the ONNX Runtime is deliberately NOT here - it goes in exactly one of
+    # the mutually-exclusive [cpu] / [cuda] extras below, because `onnxruntime`,
+    # `onnxruntime-gpu` and `onnxruntime-directml` install the SAME module name
+    # and cannot coexist in one environment. See docs/setup.md.
 ]
 
 [project.optional-dependencies]
+# --- ONNX Runtime: pick EXACTLY ONE of these per environment ------------------
+# The CPU environment (the default, and the one the full test suite must pass
+# in) must never pull a GPU package.
+#   pip install -e ".[cpu,dev]"       # laptop / CI - CPUExecutionProvider
+#   pip install -e ".[cuda,dev]"      # NVIDIA machine - CUDAExecutionProvider
+# They are mutually exclusive; installing both breaks the import. `perception.
+# provider: auto` then picks the best EP actually present (docs/setup.md).
+cpu = [
+    "onnxruntime==1.24.4",
+]
+cuda = [
+    # ORT's CUDA EP requires a matching CUDA + cuDNN runtime; 1.24.x pairs with
+    # CUDA 12.x + cuDNN 9.x (see docs/setup.md for the exact versions and the
+    # `nvcc` / cuDNN checks). onnxruntime-gpu ships CPUExecutionProvider too, so
+    # `provider: cpu` still works from a [cuda] environment.
+    "onnxruntime-gpu==1.24.4",
+]
 dev = [
     "pytest==8.3.4",
     "httpx==0.28.1",
@@ -63,4 +81,5 @@ markers = [
     "models: requires ONNX weights under models/; skips cleanly when they are absent",
     "dataset: requires the labelled evaluation set under data/eval/; skips cleanly when it is absent",
     "browser: drives the real app in headless Chromium via Playwright; skips cleanly when Playwright or its browser binary is absent",
+    "cuda: requires an onnxruntime build with CUDAExecutionProvider; skips cleanly when it is absent, runs on the NVIDIA machine",
 ]

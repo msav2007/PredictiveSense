@@ -51,6 +51,23 @@ const METRICS = [
   ["stale", "Stale"],
 ];
 
+// Phase 8: end-to-end latency stages + reconciling frame counters + pose cadence.
+const PHASE8_METRICS = [
+  ["stage_capture_to_snapshot_ms", "Capture→snapshot (ms)"],
+  ["stage_detector_ms", "Stage: detector (ms)"],
+  ["stage_pose_ms", "Stage: pose (ms)"],
+  ["stage_mailbox_dwell_ms", "Stage: mailbox dwell (ms)"],
+  ["stage_ws_out_ms_p50", "Stage: /ws/state out p50 (ms)"],
+  ["frames_decoded", "Frames decoded"],
+  ["frames_analysed", "Frames analysed"],
+  ["dropped_browser_buffer", "Dropped: browser buffer"],
+  ["dropped_mailbox", "Dropped: mailbox overwrite"],
+  ["dropped_stale", "Dropped: too old (stale guard)"],
+  ["frames_in_flight", "Frames in flight"],
+  ["pose_reused", "Pose reused (stale) this frame"],
+  ["pose_age_ms", "Reused pose age (ms)"],
+];
+
 export function render(body) {
   const grid = el("dl", { class: "metric-grid", id: "metric-grid" });
   for (const [key, label] of METRICS) {
@@ -71,12 +88,20 @@ export function render(body) {
   body.append(el("p", { class: "subhead", text: "Perception" }));
   body.append(
     el("dl", { class: "kv-list" }, [
-      kv("provider", String(p.provider ?? "—")),
+      kv("provider (config)", String(p.provider ?? "—")),
+      // Filled from GET /api/runtime below - the EP ACTUALLY in use, the active
+      // model version, and the scheduling / staleness / pose-cadence policy.
+      el("div", {}, [el("dt", {}, ["active EP"]), el("dd", { id: "rt-active-ep", text: "…" })]),
+      el("div", {}, [el("dt", {}, ["model version"]), el("dd", { id: "rt-model-version", text: "…" })]),
+      el("div", {}, [el("dt", {}, ["scheduler"]), el("dd", { id: "rt-scheduler", text: "…" })]),
+      el("div", {}, [el("dt", {}, ["max frame age (ms)"]), el("dd", { id: "rt-max-age", text: "…" })]),
+      el("div", {}, [el("dt", {}, ["pose cadence"]), el("dd", { id: "rt-pose-cadence", text: "…" })]),
+      el("div", {}, [el("dt", {}, ["machine"]), el("dd", { id: "rt-machine", text: "…" })]),
       kv("detector model", baseName(det.model_path) + " @ " + (det.input_size ?? "—")),
       kv("pose model", baseName(pos.model_path) + " @ " + (pos.input_size ?? "—")),
-      kv("pose_every_n", String(p.pose_every_n ?? 1)),
     ]),
   );
+  void fetchRuntime();
   const pgrid = el("dl", { class: "metric-grid", id: "perception-metric-grid" });
   for (const [key, label] of PERCEPTION_METRICS) {
     pgrid.append(
@@ -87,6 +112,19 @@ export function render(body) {
     );
   }
   body.append(pgrid);
+
+  // ---- Phase 8 latency stages + frame counters + pose cadence ----
+  body.append(el("p", { class: "subhead", text: "Latency stages & frame counters (Phase 8)" }));
+  const p8grid = el("dl", { class: "metric-grid", id: "phase8-metric-grid" });
+  for (const [key, label] of PHASE8_METRICS) {
+    p8grid.append(
+      el("div", {}, [
+        el("dt", {}, [label, el("span", { class: "raw-key", text: ` ${key}` })]),
+        el("dd", { id: `m-${key}`, text: "—" }),
+      ]),
+    );
+  }
+  body.append(p8grid);
 
   // ---- Phase 2.5 recognition policy ----
   body.append(el("p", { class: "subhead", text: "Recognition policy" }));
@@ -186,6 +224,32 @@ function kv(label, value) {
   return el("div", {}, [el("dt", { text: label }), el("dd", { text: value })]);
 }
 
+/* Phase 8: the EP actually in use, active model version, and the scheduling /
+ * staleness / pose-cadence policy - fetched once on render from GET /api/runtime
+ * (the live session, not the config). */
+async function fetchRuntime() {
+  const set = (id, v) => {
+    const dd = document.getElementById(id);
+    if (dd) dd.textContent = v == null || v === "" ? "—" : String(v);
+  };
+  try {
+    const r = await fetch("/api/runtime");
+    if (!r.ok) throw new Error(String(r.status));
+    const d = await r.json();
+    const ep = d.active_provider || "—";
+    const resolved = d.provider_resolved ? ` (config ${d.requested_provider} → ${d.provider_resolved})` : "";
+    set("rt-active-ep", ep + resolved);
+    set("rt-model-version", d.model_version);
+    set("rt-scheduler", d.scheduler);
+    set("rt-max-age", d.max_frame_age_ms);
+    set("rt-pose-cadence", d.pose_cadence_resolved || d.pose_cadence);
+    const mm = d.machine || {};
+    set("rt-machine", `${mm.cpu ?? "?"} · ${mm.logical_cores ?? "?"} cores · ${mm.ram_gb ?? "?"} GB · ORT ${mm.onnxruntime ?? "?"} · EPs ${(d.available_providers || []).join(", ")}`);
+  } catch (e) {
+    set("rt-active-ep", "unavailable");
+  }
+}
+
 function baseName(p) {
   return typeof p === "string" ? p.split(/[\\/]/).pop() : "—";
 }
@@ -212,6 +276,17 @@ export function update(state) {
     if (!dd) continue;
     const v = m[key];
     const digits = key.startsWith("policy_ms") ? 3 : 0;
+    dd.textContent = v === undefined || v === null || v < 0 ? "—" : Number(v).toFixed(digits);
+  }
+  for (const [key] of PHASE8_METRICS) {
+    const dd = document.getElementById(`m-${key}`);
+    if (!dd) continue;
+    const v = m[key];
+    if (key === "pose_reused") {
+      dd.textContent = v === undefined || v === null ? "—" : v >= 1 ? "yes (stale)" : "no";
+      continue;
+    }
+    const digits = key.includes("_ms") ? 1 : 0;
     dd.textContent = v === undefined || v === null || v < 0 ? "—" : Number(v).toFixed(digits);
   }
   const rd = document.getElementById("policy-raw-decided");

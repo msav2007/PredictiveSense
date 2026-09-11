@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import Any
 
@@ -20,11 +21,17 @@ from predictivesense.camera.mailbox import LatestFrameMailbox
 from predictivesense.camera.source import FrameSource, create_frame_source
 from predictivesense.config.settings import AppConfig, ConfigError
 from predictivesense.core.enums import SourceKind
-from predictivesense.core.types import Detection, Pose, StateSnapshot
+from predictivesense.core.types import Detection, PerceptionFrame, Pose, StateSnapshot
 from predictivesense.logging_setup import get_logger
 from predictivesense.perception.engine import PerceptionEngine, build_perception
 from predictivesense.perception.policy import RecognitionPolicy
+from predictivesense.pipeline.perception_frame import (
+    build_perception_frame,
+    resolve_model_version,
+)
+from predictivesense.pipeline.scheduler import run_completion_consumer
 from predictivesense.telemetry.metrics import MetricRegistry
+from predictivesense.telemetry.stages import FrameStages, record_stages
 
 __all__ = ["AnalysisLoop", "build_loop", "build_camera_source"]
 
@@ -62,12 +69,21 @@ class AnalysisLoop:
         self._policy_counts = None  # accumulated PolicyCounts, most recent apply
         self._policy_last_raw_to_decided: list[tuple[str, str]] = []
         self._perception_static: dict[str, float] = {}
+        self._active_provider = "none"
+        self._model_version = resolve_model_version()
         if perception is not None:
             info = perception.info()
             self._perception_static = {
                 "detector_warmup_ms": float(info.get("detector_warmup_ms", -1.0)),
                 "pose_warmup_ms": float(info.get("pose_warmup_ms", -1.0)),
             }
+            self._active_provider = str(
+                info.get("detector_ep")
+                or info.get("pose_ep")
+                or info.get("detector_provider")
+                or info.get("provider")
+                or "none"
+            )
             # Pre-register with a small window so percentile access is cheap.
             self.metrics.samples("detector_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
             self.metrics.samples("pose_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
@@ -75,6 +91,10 @@ class AnalysisLoop:
 
         self._sample_period = 1.0 / config.consumer.sample_rate_hz
         self._stale_after_ms = config.consumer.stale_after_ms
+        self._scheduler = config.consumer.scheduler
+        self._min_iter_period = 1.0 / config.consumer.max_analysis_rate_hz
+        self._max_frame_age_ms = config.analysis.max_frame_age_ms
+        self._dropped_stale = 0
 
         self._stop_evt = threading.Event()
         # Phase 4: the Object Learning Studio pauses monitoring while it is open.
@@ -90,6 +110,13 @@ class AnalysisLoop:
         self._listeners: list[SnapshotListener] = []
         self._snapshot_id = 0
         self._latest: StateSnapshot | None = None
+        # Phase 8: bounded ring of per-frame stage-attribution records for
+        # analysed browser frames. Read by the integration test and the
+        # attribution benchmark; never unbounded.
+        self._frame_stages: deque[FrameStages] = deque(maxlen=256)
+        # Phase 8 section 16: bounded ring of immutable per-frame perception
+        # records a future tracker will consume. StateSnapshot.tracks stays [].
+        self._perception_frame_records: deque[PerceptionFrame] = deque(maxlen=256)
         self._last_frame_mono: float | None = None
         self._last_iter_ms = 0.0
         self._max_mailbox_depth = 0
@@ -108,6 +135,31 @@ class AnalysisLoop:
     @property
     def max_mailbox_depth(self) -> int:
         return self._max_mailbox_depth
+
+    def frame_stages(self) -> list[FrameStages]:
+        """A copy of the recent per-frame stage-attribution records (Phase 8)."""
+
+        return list(self._frame_stages)
+
+    def perception_frames(self) -> list[PerceptionFrame]:
+        """A copy of the recent immutable :class:`PerceptionFrame` records - the
+        tracking-ready per-frame output a future tracker will consume (Phase 8
+        section 16). Identical structure to the recorded driver's sidecar."""
+
+        return list(self._perception_frame_records)
+
+    @property
+    def active_provider(self) -> str:
+        """ONNX Runtime EP actually in use this session (from the live session,
+        not from config). ``"none"`` when perception is off."""
+
+        return self._active_provider
+
+    @property
+    def model_version(self) -> str:
+        """Active model registry ``version_id``, or ``"unknown"``."""
+
+        return self._model_version
 
     @property
     def source(self) -> FrameSource:
@@ -200,6 +252,7 @@ class AnalysisLoop:
             return
         self._stopped = True
         self._stop_evt.set()
+        self._mailbox.wake()  # release a completion-scheduler consumer blocked in get()
 
         for thread in (self._consumer, self._producer):
             if thread is not None:
@@ -264,51 +317,86 @@ class AnalysisLoop:
                     if not self._source.is_running:
                         break
                     continue
+                if frame.trace is not None:
+                    frame.trace.mbox_enqueue_ts = time.monotonic()
                 self._mailbox.put(frame)
                 producer_rate.mark()
         except BaseException as exc:  # noqa: BLE001 - set flag, let thread exit
             self._record_error(exc, "producer")
 
     def _run_consumer(self) -> None:
-        next_due = time.monotonic()
         try:
-            while not self._stop_evt.is_set():
-                if self._pause_evt.is_set():
-                    # Studio open: run no iteration at all.
-                    self._stop_evt.wait(0.05)
-                    next_due = time.monotonic()
-                    continue
-                now = time.monotonic()
-                if now < self._stall_until:
-                    # Debug stall: do not consume. The producer + ingest socket
-                    # keep running; the mailbox fills and drops, depth stays <=1.
-                    self._stop_evt.wait(min(self._stall_until - now, 0.2))
-                    next_due = time.monotonic()
-                    continue
-                if now < next_due:
-                    self._stop_evt.wait(next_due - now)
-                    continue
-                next_due += self._sample_period
-                if next_due < time.monotonic():
-                    next_due = time.monotonic() + self._sample_period
-                self._iterate()
+            if self._scheduler == "completion":
+                run_completion_consumer(
+                    mailbox=self._mailbox,
+                    iterate_once=self._iterate,
+                    should_stop=self._stop_evt.is_set,
+                    stop_wait=self._stop_evt.wait,
+                    is_paused=self._pause_evt.is_set,
+                    stall_until=lambda: self._stall_until,
+                    min_iter_period_s=self._min_iter_period,
+                )
+            else:
+                self._run_consumer_timer()
         except BaseException as exc:  # noqa: BLE001 - set flag, let thread exit
             self._record_error(exc, "consumer")
 
+    def _run_consumer_timer(self) -> None:
+        next_due = time.monotonic()
+        while not self._stop_evt.is_set():
+            if self._pause_evt.is_set():
+                # Studio open: run no iteration at all.
+                self._stop_evt.wait(0.05)
+                next_due = time.monotonic()
+                continue
+            now = time.monotonic()
+            if now < self._stall_until:
+                # Debug stall: do not consume. The producer + ingest socket
+                # keep running; the mailbox fills and drops, depth stays <=1.
+                self._stop_evt.wait(min(self._stall_until - now, 0.2))
+                next_due = time.monotonic()
+                continue
+            if now < next_due:
+                self._stop_evt.wait(next_due - now)
+                continue
+            next_due += self._sample_period
+            if next_due < time.monotonic():
+                next_due = time.monotonic() + self._sample_period
+            self._iterate(self._mailbox.get())
+
     # -- one iteration --------------------------------------------
 
-    def _iterate(self) -> None:
+    def _iterate(self, frame: Any | None) -> None:
+        # ``frame`` is fetched by the caller: the timer scheduler passes
+        # ``self._mailbox.get()`` (may be None -> a stale snapshot is still
+        # emitted); the completion scheduler passes the frame it blocked for.
         # perf_counter (monotonic, ~100 ns) times the iteration; monotonic's
         # 15.6 ms tick on this Windows build cannot resolve it. time.time is
         # never used for any duration.
         t0 = time.perf_counter()
 
-        frame = self._mailbox.get()
         stats = self._mailbox.stats()
         if stats.depth > self._max_mailbox_depth:
             self._max_mailbox_depth = stats.depth
 
         now = time.monotonic()
+        if frame is not None:
+            if frame.trace is not None:
+                frame.trace.mbox_dequeue_ts = now
+                if frame.trace.capture_ts is not None:
+                    frame.trace.frame_age_at_dequeue_ms = (
+                        now - frame.trace.capture_ts
+                    ) * 1000.0
+            # Staleness guard (section 8): a frame already older than
+            # analysis.max_frame_age_ms at dequeue is dropped and counted
+            # `dropped_stale` - keeping the response timely, not analysing a
+            # scene state that has already passed. Disabled when the config
+            # value is 0.
+            if self._max_frame_age_ms > 0.0 and frame.capture_ts is not None:
+                age_ms = (now - frame.capture_ts) * 1000.0
+                if age_ms > self._max_frame_age_ms:
+                    self._dropped_stale += 1
+                    frame = None
         if frame is not None:
             self._last_frame_mono = now
         self.metrics.rate("loop").mark(now=now)
@@ -347,12 +435,71 @@ class AnalysisLoop:
             # Phase 1 keys (additive; no reshape).
             "capture_fps": producer_hz,
             "analysis_fps": loop_hz,
-            "dropped_analysis_frames": float(stats.dropped),
-            "drop_rate": (stats.dropped / total_seen) if total_seen else 0.0,
+            "dropped_analysis_frames": float(stats.dropped + self._dropped_stale),
+            "drop_rate": (
+                (stats.dropped + self._dropped_stale) / (total_seen)
+                if total_seen else 0.0
+            ),
             "frame_age_ms": frame_age_ms if frame_age_ms is not None else -1.0,
+            "dropped_stale": float(self._dropped_stale),
         }
         self._merge_source_metrics(metrics)
+        self._add_frame_counters(metrics, stats)
         metrics.update(perception_metrics)
+
+        # Phase 8 stage attribution: fold this frame's per-stage stamps into the
+        # existing MetricRegistry and keep the frozen record. Only browser-ingest
+        # frames carry a trace; everything else is unaffected.
+        pose_stale = perception_metrics.get("pose_reused", 0.0) >= 1.0
+
+        if frame is not None and frame.trace is not None:
+            tr = frame.trace
+            tr.detector_ms = perception_metrics.get("detector_ms")
+            tr.pose_ms = perception_metrics.get("pose_ms")
+            tr.pose_reused = pose_stale
+            tr.policy_ms = perception_metrics.get("policy_ms")
+            if tr.detector_ms is not None and tr.detector_ms < 0:
+                tr.detector_ms = None
+            if tr.pose_ms is not None and tr.pose_ms < 0:
+                tr.pose_ms = None
+            if tr.policy_ms is not None and tr.policy_ms < 0:
+                tr.policy_ms = None
+            tr.snapshot_ts = time.monotonic()
+            stages = record_stages(tr, self.metrics, frame_id=frame.frame_id)
+            self._frame_stages.append(stages)
+            for key, value in stages.as_dict().items():
+                if key == "frame_id" or value is None or isinstance(value, bool):
+                    continue
+                metrics[f"stage_{key}"] = float(value)
+            if tr.capture_client_ms is not None:
+                metrics["capture_client_ts_ms"] = float(tr.capture_client_ms)
+            # ws_out is stamped by the broadcaster into the same registry a beat
+            # later than this snapshot; surface its running p50/p95 (lagged by
+            # one) so Diagnostics and the attribution reader see the hop.
+            ws_out = self.metrics.samples("stage_ws_out_ms")
+            if ws_out.count:
+                metrics["stage_ws_out_ms_p50"] = ws_out.p50
+                metrics["stage_ws_out_ms_p95"] = ws_out.p95
+
+        # Phase 8 section 16: the immutable, tracking-ready per-frame record.
+        # Built for every analysed frame, real-time and recorded alike, via the
+        # same helper. StateSnapshot.tracks stays empty - nothing here is a track.
+        if frame is not None:
+            pose_src = perception_metrics.get("pose_src_frame_id", -1.0)
+            pose_age = perception_metrics.get("pose_age_ms", -1.0)
+            self._perception_frame_records.append(
+                build_perception_frame(
+                    frame=frame,
+                    detections=detections,
+                    poses=poses,
+                    model_version=self._model_version,
+                    provider=self._active_provider,
+                    pose_reused=pose_stale,
+                    pose_frame_id=int(pose_src) if pose_src >= 0 else None,
+                    pose_capture_ts=None,
+                    pose_age_ms=pose_age if pose_age >= 0 else None,
+                )
+            )
 
         self._snapshot_id += 1
         snapshot = StateSnapshot(
@@ -368,6 +515,7 @@ class AnalysisLoop:
             risk=None,
             metrics=metrics,
             stale=stale,
+            pose_stale=pose_stale and not stale,
         )
         self._latest = snapshot
         self._emit(snapshot)
@@ -398,6 +546,44 @@ class AnalysisLoop:
         buffer_dropped = info.get("buffer_dropped")
         if isinstance(buffer_dropped, (int, float)):
             metrics["dropped_analysis_frames"] += float(buffer_dropped)
+
+    def _add_frame_counters(self, metrics: dict[str, float], stats: Any) -> None:
+        """One reconciling frame-counter set (section 8). Never raises.
+
+        The reconciliation identity, exact at a **drained/quiescent** point
+        (both threads idle - as ``tests`` assert it), is::
+
+            frames_decoded == frames_analysed + dropped_browser_buffer
+                              + dropped_mailbox + dropped_stale + frames_in_flight
+
+        Live, ``frames_in_flight`` is a small transient 0..3 (the two single-slot
+        buffers plus the producer's just-read-not-yet-put frame) because
+        ``source.info()`` and the mailbox counters are read microseconds apart
+        while the producer runs; it never grows without bound. Both single-slot
+        dwells are reported separately by the stage attribution
+        (``stage_src_buffer_dwell_ms`` vs ``stage_mailbox_dwell_ms``).
+        """
+
+        try:
+            info = self._source.info()
+        except Exception:  # noqa: BLE001
+            return
+        decoded = info.get("frames_submitted")
+        if not isinstance(decoded, (int, float)):
+            return  # non-browser source: these counters do not apply
+        fresh = self._mailbox.stats()
+        dropped_browser = float(info.get("buffer_dropped", 0) or 0)
+        dropped_mailbox = float(fresh.dropped)
+        dropped_stale = float(self._dropped_stale)
+        analysed = float(fresh.consumed) - dropped_stale
+        in_flight = (
+            float(decoded) - analysed - dropped_stale - dropped_browser - dropped_mailbox
+        )
+        metrics["frames_decoded"] = float(decoded)
+        metrics["frames_analysed"] = analysed
+        metrics["dropped_browser_buffer"] = dropped_browser
+        metrics["dropped_mailbox"] = dropped_mailbox
+        metrics["frames_in_flight"] = in_flight
 
     def _run_perception(
         self, frame: Any
@@ -469,6 +655,12 @@ class AnalysisLoop:
             "detections_per_frame": float(len(out_detections)),
             "poses_per_frame": float(len(result.poses)),
             "perception_frame_errors": float(self._perception_errors),
+            # Phase 8 pose-cadence provenance (section 9).
+            "pose_reused": 1.0 if result.pose_reused else 0.0,
+            "pose_age_ms": result.pose_age_ms if result.pose_age_ms is not None else -1.0,
+            "pose_src_frame_id": (
+                float(result.pose_frame_id) if result.pose_frame_id is not None else -1.0
+            ),
         }
         metrics.update(self._perception_static)
         metrics.update(policy_metrics)

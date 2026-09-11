@@ -23,6 +23,7 @@ __all__ = [
     "SourceConfig",
     "ConsumerConfig",
     "BroadcastConfig",
+    "AnalysisConfig",
     "ApiConfig",
     "NoopConfig",
     "CaptureConfig",
@@ -106,11 +107,28 @@ class SourceConfig(_Section):
 class ConsumerConfig(_Section):
     sample_rate_hz: float = Field(gt=0)
     stale_after_ms: float = Field(gt=0)
+    # Phase 8: consumer scheduling strategy.
+    #   "timer"      - wake at sample_rate_hz (pre-Phase-8 behaviour).
+    #   "completion" - block on the mailbox until a frame arrives, process it,
+    #                  repeat; max_analysis_rate_hz is the CPU-protection ceiling.
+    # Chosen on measured evidence - see docs/decisions.md / phase-reports/phase8.md.
+    scheduler: Literal["timer", "completion"] = "timer"
+    max_analysis_rate_hz: float = Field(gt=0, default=30.0)
 
 
 class BroadcastConfig(_Section):
     rate_hz: float = Field(gt=0)
     client_send_timeout_s: float = Field(gt=0, default=5.0)
+
+
+class AnalysisConfig(_Section):
+    """Phase 8 staleness policy. ``max_frame_age_ms`` = 0 disables the guard
+    (the default until §6 measurements justify a value). When > 0, a frame whose
+    age at mailbox dequeue exceeds it is dropped and counted ``dropped_stale``
+    rather than analysed - dropping a stale frame to keep the response timely is
+    the intended behaviour (section 4 of the phase prompt)."""
+
+    max_frame_age_ms: float = Field(ge=0.0, default=0.0)
 
 
 class ApiConfig(_Section):
@@ -252,23 +270,70 @@ class PerceptionConfig(_Section):
     detection_enabled: bool = True
     pose_enabled: bool = True
     # Run pose only every Nth sampled frame if the latency budget demands it.
-    # Measure before raising this above 1.
+    # Measure before raising this above 1. Kept for back-compat; a value > 1 is
+    # honoured as `pose_cadence = "every_n:<pose_every_n>"` when pose_cadence is
+    # left at its default.
     pose_every_n: int = Field(ge=1, default=1)
+    # Phase 8 pose-cadence decoupling (section 9). Detection never waits on pose:
+    # on a frame where pose is not due, the last pose is reused as an immutable
+    # value object carrying its own frame_id / capture_ts / age and stale=true,
+    # bounded by pose_max_reuse_ms. Forms: "every_frame" | "every_n:<int>" |
+    # "interval_ms:<float>". Cadence decisions use frame capture timestamps, not
+    # wall time, so recorded mode stays deterministic.
+    pose_cadence: str = Field(default="every_frame")
+    pose_max_reuse_ms: float = Field(gt=0.0, default=500.0)
     # ONNX Runtime intra-op threads per session. 0 = ORT default (all cores),
     # which OVER-subscribes badly with two sessions + the loop's other threads
     # (measured: combined detector+pose p50 collapses from ~90 ms to ~440 ms
     # under contention). 6 is the measured knee on this 14C/18T machine.
     intra_op_threads: int = Field(ge=0, default=6)
-    # Chosen from results/providers_*.json. "cpu" is plain onnxruntime; "dml"
-    # requires onnxruntime-directml in a separate environment (never the main
-    # .venv); "openvino" is optional/deferred.
-    provider: Literal["cpu", "dml", "openvino"] = "cpu"
+    # Phase 8: never hard-code a provider. "auto" picks the first available EP in
+    # a documented order (cuda -> directml -> cpu), always falling back to CPU
+    # and logging which and why (perception/runtime.py::resolve_provider). An
+    # explicitly named provider whose EP is absent is a LOUD failure
+    # (ProviderUnavailableError), never a silent CPU fallback. The EP actually in
+    # use is reported (from the live session's get_providers()) in Diagnostics,
+    # the session manifest and every benchmark result file. "dml" is a kept
+    # alias of "directml" for the historical .venv-dml benchmark path.
+    provider: Literal["auto", "cpu", "cuda", "directml", "dml"] = "auto"
     detector: DetectorConfig = Field(default_factory=DetectorConfig)
     pose: PoseConfig = Field(default_factory=PoseConfig)
 
     @property
     def any_enabled(self) -> bool:
         return self.detection_enabled or self.pose_enabled
+
+    @field_validator("pose_cadence")
+    @classmethod
+    def _check_pose_cadence(cls, value: str) -> str:
+        if value == "every_frame":
+            return value
+        for prefix, cast in (("every_n:", int), ("interval_ms:", float)):
+            if value.startswith(prefix):
+                try:
+                    n = cast(value[len(prefix):])
+                except ValueError as exc:
+                    raise ValueError(f"pose_cadence {value!r}: {exc}") from exc
+                if n <= 0:
+                    raise ValueError(f"pose_cadence {value!r}: value must be > 0")
+                return value
+        raise ValueError(
+            "pose_cadence must be 'every_frame', 'every_n:<int>' or "
+            f"'interval_ms:<float>' (got {value!r})"
+        )
+
+    def pose_cadence_spec(self) -> tuple[str, float | None]:
+        """Resolved cadence as ``(kind, value)``: ``("every_frame", None)`` |
+        ``("every_n", N)`` | ``("interval_ms", M)``. A legacy ``pose_every_n`` > 1
+        wins only while ``pose_cadence`` is still the default."""
+
+        if self.pose_cadence == "every_frame":
+            if self.pose_every_n > 1:
+                return ("every_n", float(self.pose_every_n))
+            return ("every_frame", None)
+        if self.pose_cadence.startswith("every_n:"):
+            return ("every_n", float(int(self.pose_cadence[len("every_n:"):])))
+        return ("interval_ms", float(self.pose_cadence[len("interval_ms:"):]))
 
     # -- Phase 2.5: person-gated pose --------------------------------
     # Measured before/after in docs/phase-reports/phase2_5.md. When true, pose
@@ -507,6 +572,7 @@ class AppConfig(BaseSettings):
     source: SourceConfig
     consumer: ConsumerConfig
     broadcast: BroadcastConfig
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     noop: NoopConfig = Field(default_factory=NoopConfig)
     capture: CaptureConfig = Field(default_factory=CaptureConfig)

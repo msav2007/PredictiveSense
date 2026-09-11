@@ -82,6 +82,13 @@ class ObjectDetector:
         return self._handle.provider
 
     @property
+    def ep_name(self) -> str:
+        """The ONNX Runtime execution-provider name actually backing the session
+        (e.g. ``CPUExecutionProvider`` / ``CUDAExecutionProvider``)."""
+
+        return self._handle.ep_name
+
+    @property
     def model_name(self) -> str:
         return self._handle.model_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
