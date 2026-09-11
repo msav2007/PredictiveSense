@@ -20,6 +20,17 @@ export const runtime = {
   ageSamples: [], // frame_age_ms reservoir for p50/p95 (bounded)
   paintAgeSamples: [], // Phase 8: capture(drawImage)->overlay-paint age, ms (bounded)
   lastPaintMs: 0, // Phase 8: overlay draw() duration, ms
+  // Phase 8 post-emission investigation: the snapshot-emit -> paint gap broken
+  // into ws.onmessage -> JSON.parse, store.notify() fan-out (shell + all group
+  // updates + overlay draw, since draw() runs synchronously off the same
+  // notify() call - not deferred to a later task or rAF), and a compositor
+  // proxy (draw() return -> next requestAnimationFrame). All bounded reservoirs.
+  parseMsSamples: [],
+  notifyMsSamples: [],
+  compositorMsSamples: [],
+  lastParseMs: 0,
+  lastNotifyMs: 0,
+  lastCompositorMs: 0,
   recorder: null,
   recChunks: [],
   recStart: 0,

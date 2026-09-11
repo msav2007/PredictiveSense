@@ -61,7 +61,10 @@ _ATTR_STAGES = (
     ("pose", "pose inference"),
     ("policy", "recognition policy"),
     ("snapshot_build", "snapshot assembly"),
-    ("ws_out", "emit -> /ws/state send"),
+    ("ws_out", "emit -> /ws/state send (broadcaster-side lagged rolling p50, not per-frame)"),
+    ("ws_parse", "browser: ws.onmessage -> JSON.parse done"),
+    ("notify_dispatch", "browser: store.notify() fan-out incl. synchronous overlay draw()"),
+    ("compositor", "browser: draw() return -> next requestAnimationFrame (compositor proxy)"),
     ("overlay_paint", "capture -> overlay paint (browser, client clock)"),
 )
 
@@ -131,9 +134,20 @@ _PAGE_COLLECTOR = r"""
               push(k.slice(6, -3), s.metrics[k]);
             }
           }
+          // stage_ws_out_ms_p50 is a broadcaster-side lagged rolling percentile
+          // (see loop.py), not a per-frame "stage_<name>_ms" key, so the loop
+          // above never matches it - read it explicitly instead of silently
+          // dropping the ws_out hop from this attribution.
+          if (typeof s.metrics.stage_ws_out_ms_p50 === "number") {
+            push("ws_out", s.metrics.stage_ws_out_ms_p50);
+          }
         }
         const pa = mod.runtime.paintAgeSamples || [];
         window.__ps.paint = pa.slice();
+        // Phase 8 post-emission investigation reservoirs (runtime.js).
+        window.__ps.stages.ws_parse = (mod.runtime.parseMsSamples || []).slice();
+        window.__ps.stages.notify_dispatch = (mod.runtime.notifyMsSamples || []).slice();
+        window.__ps.stages.compositor = (mod.runtime.compositorMsSamples || []).slice();
       }
     } catch (e) {}
     setTimeout(tick, 200);

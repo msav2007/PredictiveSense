@@ -213,7 +213,8 @@ function draw() {
   // own drawImage epoch-ms clock echoed back through the snapshot, so this
   // subtraction is a pure client-clock delta with no cross-clock error. Only
   // meaningful for a fresh (non-stale) frame.
-  runtime.lastPaintMs = performance.now() - paintT0;
+  const drawEndTs = performance.now();
+  runtime.lastPaintMs = drawEndTs - paintT0;
   const capMs = snap.metrics && snap.metrics.capture_client_ts_ms;
   if (!snap.stale && typeof capMs === "number" && capMs > 0) {
     const paintAge = performance.timeOrigin + performance.now() - capMs;
@@ -223,6 +224,24 @@ function draw() {
         runtime.paintAgeSamples.shift();
       }
     }
+  }
+
+  // Phase 8 post-emission investigation: draw() only issues canvas commands -
+  // it does not prove the compositor has actually presented them. Schedule a
+  // requestAnimationFrame right after the synchronous draw work returns; a rAF
+  // callback runs immediately before the browser composites the next frame, so
+  // this delta is a standard proxy for "how long until this paint reaches the
+  // screen" (not the true compositor cost, which DevTools cannot expose to page
+  // script either). Skipped for a stale snapshot (nothing new to compose).
+  if (!snap.stale) {
+    requestAnimationFrame(() => {
+      const compositorMs = performance.now() - drawEndTs;
+      runtime.lastCompositorMs = compositorMs;
+      runtime.compositorMsSamples.push(compositorMs);
+      if (runtime.compositorMsSamples.length > MAX_AGE_SAMPLES) {
+        runtime.compositorMsSamples.shift();
+      }
+    });
   }
 }
 
