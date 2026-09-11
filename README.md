@@ -58,7 +58,3 @@ unknown field, or a value that fails validation raises a clear error and exits
 non-zero. Environment overrides use the `PS_` prefix with `__` as the nested
 delimiter (for example `PS_API__PORT=9001`).
 
-## Layout
-
-See `CLAUDE.md` for the module map and `docs/architecture.md` for the wire
-format and threading model.
