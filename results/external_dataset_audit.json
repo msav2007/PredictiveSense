@@ -1,0 +1,1512 @@
+{
+  "source": {
+    "root": "C:\\Users\\mummi\\fiftyone\\open-images-v7",
+    "split": "train",
+    "labels_csv": "C:\\Users\\mummi\\fiftyone\\open-images-v7\\train\\labels\\detections.csv",
+    "labels_csv_note": "detections.csv is the full multi-split Open Images V7 annotation file, not pre-filtered to this download's samples; every count below is filtered by this script to the image IDs actually present under data/."
+  },
+  "total_samples": 5000,
+  "total_detection_rows_scanned_in_full_csv": 14610229,
+  "total_annotations_in_subset": 37471,
+  "images_with_no_target_class_annotation": 40,
+  "images_with_multiple_target_classes": 693,
+  "target_class_audit": {
+    "Bottle": {
+      "mid": "/m/04dr76w",
+      "name": "Bottle",
+      "boxes": 3550,
+      "images": 847,
+      "box_area_frac": {
+        "min": 0.000148,
+        "median": 0.019863,
+        "p95": 0.367851,
+        "max": 0.998438
+      }
+    },
+    "Glasses": {
+      "mid": "/m/0jyfg",
+      "name": "Glasses",
+      "boxes": 2975,
+      "images": 2186,
+      "box_area_frac": {
+        "min": 1.9e-05,
+        "median": 0.012018,
+        "p95": 0.098645,
+        "max": 0.983448
+      }
+    },
+    "Mobile phone": {
+      "mid": "/m/050k8",
+      "name": "Mobile phone",
+      "boxes": 607,
+      "images": 410,
+      "box_area_frac": {
+        "min": 0.000408,
+        "median": 0.208415,
+        "p95": 0.867314,
+        "max": 0.998543
+      }
+    },
+    "Computer keyboard": {
+      "mid": "/m/01m2v",
+      "name": "Computer keyboard",
+      "boxes": 578,
+      "images": 409,
+      "box_area_frac": {
+        "min": 7.9e-05,
+        "median": 0.069858,
+        "p95": 0.931917,
+        "max": 1.0
+      }
+    },
+    "Sunglasses": {
+      "mid": "/m/017ftj",
+      "name": "Sunglasses",
+      "boxes": 556,
+      "images": 372,
+      "box_area_frac": {
+        "min": 6.2e-05,
+        "median": 0.011089,
+        "p95": 0.118579,
+        "max": 0.662712
+      }
+    },
+    "Coffee cup": {
+      "mid": "/m/02p5f1q",
+      "name": "Coffee cup",
+      "boxes": 513,
+      "images": 379,
+      "box_area_frac": {
+        "min": 0.0002,
+        "median": 0.107335,
+        "p95": 0.69961,
+        "max": 0.998438
+      }
+    },
+    "Bowl": {
+      "mid": "/m/04kkgm",
+      "name": "Bowl",
+      "boxes": 476,
+      "images": 165,
+      "box_area_frac": {
+        "min": 5.8e-05,
+        "median": 0.035811,
+        "p95": 0.498084,
+        "max": 0.953175
+      }
+    },
+    "Goggles": {
+      "mid": "/m/02_n6y",
+      "name": "Goggles",
+      "boxes": 292,
+      "images": 224,
+      "box_area_frac": {
+        "min": 0.000255,
+        "median": 0.033996,
+        "p95": 0.190384,
+        "max": 0.654992
+      }
+    },
+    "Tin can": {
+      "mid": "/m/02jnhm",
+      "name": "Tin can",
+      "boxes": 254,
+      "images": 148,
+      "box_area_frac": {
+        "min": 0.00122,
+        "median": 0.194215,
+        "p95": 0.962207,
+        "max": 0.998539
+      }
+    },
+    "Mug": {
+      "mid": "/m/02jvh9",
+      "name": "Mug",
+      "boxes": 250,
+      "images": 187,
+      "box_area_frac": {
+        "min": 0.000598,
+        "median": 0.150255,
+        "p95": 0.759675,
+        "max": 0.992187
+      }
+    },
+    "Watch": {
+      "mid": "/m/0gjkl",
+      "name": "Watch",
+      "boxes": 222,
+      "images": 189,
+      "box_area_frac": {
+        "min": 0.001494,
+        "median": 0.319922,
+        "p95": 0.950192,
+        "max": 0.99875
+      }
+    },
+    "Pen": {
+      "mid": "/m/0k1tl",
+      "name": "Pen",
+      "boxes": 214,
+      "images": 136,
+      "box_area_frac": {
+        "min": 0.000743,
+        "median": 0.096567,
+        "p95": 0.535766,
+        "max": 0.776834
+      }
+    },
+    "Headphones": {
+      "mid": "/m/01b7fy",
+      "name": "Headphones",
+      "boxes": 141,
+      "images": 120,
+      "box_area_frac": {
+        "min": 0.006725,
+        "median": 0.166254,
+        "p95": 0.971893,
+        "max": 0.998386
+      }
+    },
+    "Mixing bowl": {
+      "mid": "/m/03hj559",
+      "name": "Mixing bowl",
+      "boxes": 100,
+      "images": 59,
+      "box_area_frac": {
+        "min": 0.00383,
+        "median": 0.081608,
+        "p95": 0.781696,
+        "max": 0.997722
+      }
+    },
+    "Cocktail shaker": {
+      "mid": "/m/0440zs",
+      "name": "Cocktail shaker",
+      "boxes": 7,
+      "images": 5,
+      "box_area_frac": {
+        "min": 0.026854,
+        "median": 0.179794,
+        "p95": 0.277678,
+        "max": 0.277678
+      }
+    },
+    "Musical keyboard": {
+      "mid": "/m/057cc",
+      "name": "Musical keyboard",
+      "boxes": 6,
+      "images": 6,
+      "box_area_frac": {
+        "min": 0.273984,
+        "median": 0.392277,
+        "p95": 0.901057,
+        "max": 0.901057
+      }
+    },
+    "Corded phone": {
+      "mid": "/m/0h8lkj8",
+      "name": "Corded phone",
+      "boxes": 5,
+      "images": 4,
+      "box_area_frac": {
+        "min": 0.016771,
+        "median": 0.02235,
+        "p95": 0.029612,
+        "max": 0.029612
+      }
+    },
+    "Pencil case": {
+      "mid": "/m/05676x",
+      "name": "Pencil case",
+      "boxes": 4,
+      "images": 1,
+      "box_area_frac": {
+        "min": 0.224656,
+        "median": 0.338319,
+        "p95": 0.340213,
+        "max": 0.340213
+      }
+    },
+    "Measuring cup": {
+      "mid": "/m/07v9_z",
+      "name": "Measuring cup",
+      "boxes": 1,
+      "images": 1,
+      "box_area_frac": {
+        "min": 0.17242,
+        "median": 0.17242,
+        "p95": 0.17242,
+        "max": 0.17242
+      }
+    }
+  },
+  "target_classes_with_zero_matches": [
+    "Can opener",
+    "Pencil sharpener",
+    "Salt and pepper shakers",
+    "Telephone"
+  ],
+  "exact_open_images_classes_present_in_subset": [
+    {
+      "name": "Human face",
+      "boxes": 5125
+    },
+    {
+      "name": "Man",
+      "boxes": 3826
+    },
+    {
+      "name": "Bottle",
+      "boxes": 3550
+    },
+    {
+      "name": "Glasses",
+      "boxes": 2975
+    },
+    {
+      "name": "Woman",
+      "boxes": 2029
+    },
+    {
+      "name": "Human hair",
+      "boxes": 843
+    },
+    {
+      "name": "Human head",
+      "boxes": 825
+    },
+    {
+      "name": "Drink",
+      "boxes": 804
+    },
+    {
+      "name": "Human eye",
+      "boxes": 717
+    },
+    {
+      "name": "Person",
+      "boxes": 656
+    },
+    {
+      "name": "Wine",
+      "boxes": 640
+    },
+    {
+      "name": "Human arm",
+      "boxes": 628
+    },
+    {
+      "name": "Mobile phone",
+      "boxes": 607
+    },
+    {
+      "name": "Girl",
+      "boxes": 590
+    },
+    {
+      "name": "Computer keyboard",
+      "boxes": 578
+    },
+    {
+      "name": "Sunglasses",
+      "boxes": 556
+    },
+    {
+      "name": "Coffee cup",
+      "boxes": 513
+    },
+    {
+      "name": "Bowl",
+      "boxes": 476
+    },
+    {
+      "name": "Human nose",
+      "boxes": 462
+    },
+    {
+      "name": "Clothing",
+      "boxes": 461
+    },
+    {
+      "name": "Human mouth",
+      "boxes": 393
+    },
+    {
+      "name": "Beer",
+      "boxes": 388
+    },
+    {
+      "name": "Human body",
+      "boxes": 374
+    },
+    {
+      "name": "Tree",
+      "boxes": 368
+    },
+    {
+      "name": "Footwear",
+      "boxes": 327
+    },
+    {
+      "name": "Human hand",
+      "boxes": 315
+    },
+    {
+      "name": "Mammal",
+      "boxes": 312
+    },
+    {
+      "name": "Goggles",
+      "boxes": 292
+    },
+    {
+      "name": "Laptop",
+      "boxes": 289
+    },
+    {
+      "name": "Wine glass",
+      "boxes": 260
+    },
+    {
+      "name": "Tin can",
+      "boxes": 254
+    },
+    {
+      "name": "Suit",
+      "boxes": 251
+    },
+    {
+      "name": "Mug",
+      "boxes": 250
+    },
+    {
+      "name": "Food",
+      "boxes": 235
+    },
+    {
+      "name": "Watch",
+      "boxes": 222
+    },
+    {
+      "name": "Saucer",
+      "boxes": 220
+    },
+    {
+      "name": "Human ear",
+      "boxes": 216
+    },
+    {
+      "name": "Pen",
+      "boxes": 214
+    },
+    {
+      "name": "Coffee",
+      "boxes": 209
+    },
+    {
+      "name": "Table",
+      "boxes": 192
+    },
+    {
+      "name": "Plate",
+      "boxes": 168
+    },
+    {
+      "name": "Boy",
+      "boxes": 157
+    },
+    {
+      "name": "Computer monitor",
+      "boxes": 146
+    },
+    {
+      "name": "Headphones",
+      "boxes": 141
+    },
+    {
+      "name": "Jeans",
+      "boxes": 140
+    },
+    {
+      "name": "Fast food",
+      "boxes": 129
+    },
+    {
+      "name": "Office supplies",
+      "boxes": 129
+    },
+    {
+      "name": "Chair",
+      "boxes": 119
+    },
+    {
+      "name": "Desk",
+      "boxes": 118
+    },
+    {
+      "name": "Plant",
+      "boxes": 114
+    },
+    {
+      "name": "Snack",
+      "boxes": 110
+    },
+    {
+      "name": "Computer mouse",
+      "boxes": 107
+    },
+    {
+      "name": "Platter",
+      "boxes": 102
+    },
+    {
+      "name": "Mixing bowl",
+      "boxes": 100
+    },
+    {
+      "name": "Jacket",
+      "boxes": 96
+    },
+    {
+      "name": "Tea",
+      "boxes": 91
+    },
+    {
+      "name": "Human beard",
+      "boxes": 90
+    },
+    {
+      "name": "Hat",
+      "boxes": 88
+    },
+    {
+      "name": "Microphone",
+      "boxes": 85
+    },
+    {
+      "name": "Flower",
+      "boxes": 81
+    },
+    {
+      "name": "Dress",
+      "boxes": 78
+    },
+    {
+      "name": "Shirt",
+      "boxes": 76
+    },
+    {
+      "name": "Wheel",
+      "boxes": 73
+    },
+    {
+      "name": "Car",
+      "boxes": 72
+    },
+    {
+      "name": "Human leg",
+      "boxes": 68
+    },
+    {
+      "name": "Sun hat",
+      "boxes": 66
+    },
+    {
+      "name": "Dessert",
+      "boxes": 64
+    },
+    {
+      "name": "Furniture",
+      "boxes": 64
+    },
+    {
+      "name": "Toy",
+      "boxes": 60
+    },
+    {
+      "name": "Spoon",
+      "boxes": 56
+    },
+    {
+      "name": "Office building",
+      "boxes": 55
+    },
+    {
+      "name": "Book",
+      "boxes": 54
+    },
+    {
+      "name": "Kitchen appliance",
+      "boxes": 50
+    },
+    {
+      "name": "Tie",
+      "boxes": 49
+    },
+    {
+      "name": "Tableware",
+      "boxes": 46
+    },
+    {
+      "name": "Cocktail",
+      "boxes": 43
+    },
+    {
+      "name": "Helmet",
+      "boxes": 40
+    },
+    {
+      "name": "Fedora",
+      "boxes": 35
+    },
+    {
+      "name": "Poster",
+      "boxes": 34
+    },
+    {
+      "name": "Window",
+      "boxes": 32
+    },
+    {
+      "name": "Baked goods",
+      "boxes": 31
+    },
+    {
+      "name": "Land vehicle",
+      "boxes": 31
+    },
+    {
+      "name": "Fruit",
+      "boxes": 30
+    },
+    {
+      "name": "Coat",
+      "boxes": 29
+    },
+    {
+      "name": "Candle",
+      "boxes": 26
+    },
+    {
+      "name": "Cowboy hat",
+      "boxes": 26
+    },
+    {
+      "name": "Scarf",
+      "boxes": 26
+    },
+    {
+      "name": "Tire",
+      "boxes": 25
+    },
+    {
+      "name": "Shorts",
+      "boxes": 24
+    },
+    {
+      "name": "Tablet computer",
+      "boxes": 24
+    },
+    {
+      "name": "Bicycle wheel",
+      "boxes": 23
+    },
+    {
+      "name": "Building",
+      "boxes": 23
+    },
+    {
+      "name": "Cabinetry",
+      "boxes": 23
+    },
+    {
+      "name": "Camera",
+      "boxes": 23
+    },
+    {
+      "name": "Trousers",
+      "boxes": 23
+    },
+    {
+      "name": "Juice",
+      "boxes": 22
+    },
+    {
+      "name": "Chopsticks",
+      "boxes": 21
+    },
+    {
+      "name": "Shelf",
+      "boxes": 21
+    },
+    {
+      "name": "Fork",
+      "boxes": 20
+    },
+    {
+      "name": "Swimwear",
+      "boxes": 20
+    },
+    {
+      "name": "Vase",
+      "boxes": 19
+    },
+    {
+      "name": "Cat",
+      "boxes": 18
+    },
+    {
+      "name": "Fashion accessory",
+      "boxes": 18
+    },
+    {
+      "name": "Television",
+      "boxes": 18
+    },
+    {
+      "name": "Vegetable",
+      "boxes": 18
+    },
+    {
+      "name": "Musical instrument",
+      "boxes": 17
+    },
+    {
+      "name": "Bicycle helmet",
+      "boxes": 16
+    },
+    {
+      "name": "Box",
+      "boxes": 16
+    },
+    {
+      "name": "Drawer",
+      "boxes": 16
+    },
+    {
+      "name": "House",
+      "boxes": 16
+    },
+    {
+      "name": "Kitchen utensil",
+      "boxes": 16
+    },
+    {
+      "name": "Necklace",
+      "boxes": 16
+    },
+    {
+      "name": "Clock",
+      "boxes": 15
+    },
+    {
+      "name": "Digital clock",
+      "boxes": 15
+    },
+    {
+      "name": "Guitar",
+      "boxes": 15
+    },
+    {
+      "name": "Ipod",
+      "boxes": 15
+    },
+    {
+      "name": "Salad",
+      "boxes": 15
+    },
+    {
+      "name": "Sports uniform",
+      "boxes": 15
+    },
+    {
+      "name": "Countertop",
+      "boxes": 14
+    },
+    {
+      "name": "Dog",
+      "boxes": 14
+    },
+    {
+      "name": "Lipstick",
+      "boxes": 14
+    },
+    {
+      "name": "Picture frame",
+      "boxes": 14
+    },
+    {
+      "name": "Strawberry",
+      "boxes": 14
+    },
+    {
+      "name": "Vehicle",
+      "boxes": 14
+    },
+    {
+      "name": "Bicycle",
+      "boxes": 13
+    },
+    {
+      "name": "Dairy Product",
+      "boxes": 13
+    },
+    {
+      "name": "Flowerpot",
+      "boxes": 13
+    },
+    {
+      "name": "Pastry",
+      "boxes": 13
+    },
+    {
+      "name": "Boat",
+      "boxes": 12
+    },
+    {
+      "name": "Houseplant",
+      "boxes": 12
+    },
+    {
+      "name": "Jug",
+      "boxes": 12
+    },
+    {
+      "name": "Sushi",
+      "boxes": 12
+    },
+    {
+      "name": "Cosmetics",
+      "boxes": 11
+    },
+    {
+      "name": "Seafood",
+      "boxes": 11
+    },
+    {
+      "name": "Teapot",
+      "boxes": 11
+    },
+    {
+      "name": "Apple",
+      "boxes": 10
+    },
+    {
+      "name": "Ice cream",
+      "boxes": 10
+    },
+    {
+      "name": "Brassiere",
+      "boxes": 9
+    },
+    {
+      "name": "Home appliance",
+      "boxes": 9
+    },
+    {
+      "name": "Palm tree",
+      "boxes": 9
+    },
+    {
+      "name": "Personal care",
+      "boxes": 9
+    },
+    {
+      "name": "Balloon",
+      "boxes": 8
+    },
+    {
+      "name": "Cake",
+      "boxes": 8
+    },
+    {
+      "name": "Chest of drawers",
+      "boxes": 8
+    },
+    {
+      "name": "Rose",
+      "boxes": 8
+    },
+    {
+      "name": "Bread",
+      "boxes": 7
+    },
+    {
+      "name": "Cocktail shaker",
+      "boxes": 7
+    },
+    {
+      "name": "Coffee table",
+      "boxes": 7
+    },
+    {
+      "name": "Cookie",
+      "boxes": 7
+    },
+    {
+      "name": "Doll",
+      "boxes": 7
+    },
+    {
+      "name": "Flag",
+      "boxes": 7
+    },
+    {
+      "name": "Glove",
+      "boxes": 7
+    },
+    {
+      "name": "Lemon",
+      "boxes": 7
+    },
+    {
+      "name": "Piano",
+      "boxes": 7
+    },
+    {
+      "name": "Studio couch",
+      "boxes": 7
+    },
+    {
+      "name": "Couch",
+      "boxes": 6
+    },
+    {
+      "name": "Egg (Food)",
+      "boxes": 6
+    },
+    {
+      "name": "French fries",
+      "boxes": 6
+    },
+    {
+      "name": "Grapefruit",
+      "boxes": 6
+    },
+    {
+      "name": "Musical keyboard",
+      "boxes": 6
+    },
+    {
+      "name": "Paddle",
+      "boxes": 6
+    },
+    {
+      "name": "Pitcher (Container)",
+      "boxes": 6
+    },
+    {
+      "name": "Serving tray",
+      "boxes": 6
+    },
+    {
+      "name": "Ski",
+      "boxes": 6
+    },
+    {
+      "name": "Sports equipment",
+      "boxes": 6
+    },
+    {
+      "name": "Billboard",
+      "boxes": 5
+    },
+    {
+      "name": "Bookcase",
+      "boxes": 5
+    },
+    {
+      "name": "Christmas tree",
+      "boxes": 5
+    },
+    {
+      "name": "Convenience store",
+      "boxes": 5
+    },
+    {
+      "name": "Corded phone",
+      "boxes": 5
+    },
+    {
+      "name": "Cupboard",
+      "boxes": 5
+    },
+    {
+      "name": "Drinking straw",
+      "boxes": 5
+    },
+    {
+      "name": "Hamburger",
+      "boxes": 5
+    },
+    {
+      "name": "Hamster",
+      "boxes": 5
+    },
+    {
+      "name": "Lamp",
+      "boxes": 5
+    },
+    {
+      "name": "Mouse",
+      "boxes": 5
+    },
+    {
+      "name": "Perfume",
+      "boxes": 5
+    },
+    {
+      "name": "Pizza",
+      "boxes": 5
+    },
+    {
+      "name": "Plastic bag",
+      "boxes": 5
+    },
+    {
+      "name": "Pumpkin",
+      "boxes": 5
+    },
+    {
+      "name": "Seat belt",
+      "boxes": 5
+    },
+    {
+      "name": "Skyscraper",
+      "boxes": 5
+    },
+    {
+      "name": "Sombrero",
+      "boxes": 5
+    },
+    {
+      "name": "Wine rack",
+      "boxes": 5
+    },
+    {
+      "name": "Zucchini",
+      "boxes": 5
+    },
+    {
+      "name": "Auto part",
+      "boxes": 4
+    },
+    {
+      "name": "Ball",
+      "boxes": 4
+    },
+    {
+      "name": "Bathroom accessory",
+      "boxes": 4
+    },
+    {
+      "name": "Croissant",
+      "boxes": 4
+    },
+    {
+      "name": "Curtain",
+      "boxes": 4
+    },
+    {
+      "name": "Door",
+      "boxes": 4
+    },
+    {
+      "name": "Drum",
+      "boxes": 4
+    },
+    {
+      "name": "Earrings",
+      "boxes": 4
+    },
+    {
+      "name": "Gondola",
+      "boxes": 4
+    },
+    {
+      "name": "Human foot",
+      "boxes": 4
+    },
+    {
+      "name": "Kettle",
+      "boxes": 4
+    },
+    {
+      "name": "Kitchen & dining room table",
+      "boxes": 4
+    },
+    {
+      "name": "Orange",
+      "boxes": 4
+    },
+    {
+      "name": "Pencil case",
+      "boxes": 4
+    },
+    {
+      "name": "Pillow",
+      "boxes": 4
+    },
+    {
+      "name": "Snowboard",
+      "boxes": 4
+    },
+    {
+      "name": "Surfboard",
+      "boxes": 4
+    },
+    {
+      "name": "Swimming pool",
+      "boxes": 4
+    },
+    {
+      "name": "Tap",
+      "boxes": 4
+    },
+    {
+      "name": "Tent",
+      "boxes": 4
+    },
+    {
+      "name": "Tripod",
+      "boxes": 4
+    },
+    {
+      "name": "Vehicle registration plate",
+      "boxes": 4
+    },
+    {
+      "name": "Wok",
+      "boxes": 4
+    },
+    {
+      "name": "Candy",
+      "boxes": 3
+    },
+    {
+      "name": "Cheese",
+      "boxes": 3
+    },
+    {
+      "name": "Chicken",
+      "boxes": 3
+    },
+    {
+      "name": "Closet",
+      "boxes": 3
+    },
+    {
+      "name": "Crab",
+      "boxes": 3
+    },
+    {
+      "name": "Filing cabinet",
+      "boxes": 3
+    },
+    {
+      "name": "Flute",
+      "boxes": 3
+    },
+    {
+      "name": "Grape",
+      "boxes": 3
+    },
+    {
+      "name": "Handbag",
+      "boxes": 3
+    },
+    {
+      "name": "Lion",
+      "boxes": 3
+    },
+    {
+      "name": "Medical equipment",
+      "boxes": 3
+    },
+    {
+      "name": "Milk",
+      "boxes": 3
+    },
+    {
+      "name": "Mirror",
+      "boxes": 3
+    },
+    {
+      "name": "Personal flotation device",
+      "boxes": 3
+    },
+    {
+      "name": "Power plugs and sockets",
+      "boxes": 3
+    },
+    {
+      "name": "Rabbit",
+      "boxes": 3
+    },
+    {
+      "name": "Sandal",
+      "boxes": 3
+    },
+    {
+      "name": "Sandwich",
+      "boxes": 3
+    },
+    {
+      "name": "Sink",
+      "boxes": 3
+    },
+    {
+      "name": "Sofa bed",
+      "boxes": 3
+    },
+    {
+      "name": "Trumpet",
+      "boxes": 3
+    },
+    {
+      "name": "Watermelon",
+      "boxes": 3
+    },
+    {
+      "name": "Whiteboard",
+      "boxes": 3
+    },
+    {
+      "name": "Animal",
+      "boxes": 2
+    },
+    {
+      "name": "Barrel",
+      "boxes": 2
+    },
+    {
+      "name": "Bathroom cabinet",
+      "boxes": 2
+    },
+    {
+      "name": "Bathtub",
+      "boxes": 2
+    },
+    {
+      "name": "Belt",
+      "boxes": 2
+    },
+    {
+      "name": "Bench",
+      "boxes": 2
+    },
+    {
+      "name": "Bow and arrow",
+      "boxes": 2
+    },
+    {
+      "name": "Broccoli",
+      "boxes": 2
+    },
+    {
+      "name": "Bus",
+      "boxes": 2
+    },
+    {
+      "name": "Calculator",
+      "boxes": 2
+    },
+    {
+      "name": "Coffeemaker",
+      "boxes": 2
+    },
+    {
+      "name": "Coin",
+      "boxes": 2
+    },
+    {
+      "name": "Cucumber",
+      "boxes": 2
+    },
+    {
+      "name": "Cutting board",
+      "boxes": 2
+    },
+    {
+      "name": "Frying pan",
+      "boxes": 2
+    },
+    {
+      "name": "Gas stove",
+      "boxes": 2
+    },
+    {
+      "name": "Horse",
+      "boxes": 2
+    },
+    {
+      "name": "Mango",
+      "boxes": 2
+    },
+    {
+      "name": "Microwave oven",
+      "boxes": 2
+    },
+    {
+      "name": "Motorcycle",
+      "boxes": 2
+    },
+    {
+      "name": "Nightstand",
+      "boxes": 2
+    },
+    {
+      "name": "Oven",
+      "boxes": 2
+    },
+    {
+      "name": "Parrot",
+      "boxes": 2
+    },
+    {
+      "name": "Penguin",
+      "boxes": 2
+    },
+    {
+      "name": "Printer",
+      "boxes": 2
+    },
+    {
+      "name": "Refrigerator",
+      "boxes": 2
+    },
+    {
+      "name": "Ring binder",
+      "boxes": 2
+    },
+    {
+      "name": "Skull",
+      "boxes": 2
+    },
+    {
+      "name": "Spice rack",
+      "boxes": 2
+    },
+    {
+      "name": "Squirrel",
+      "boxes": 2
+    },
+    {
+      "name": "Swim cap",
+      "boxes": 2
+    },
+    {
+      "name": "Teddy bear",
+      "boxes": 2
+    },
+    {
+      "name": "Tomato",
+      "boxes": 2
+    },
+    {
+      "name": "Tool",
+      "boxes": 2
+    },
+    {
+      "name": "Tower",
+      "boxes": 2
+    },
+    {
+      "name": "Wall clock",
+      "boxes": 2
+    },
+    {
+      "name": "Watercraft",
+      "boxes": 2
+    },
+    {
+      "name": "Whisk",
+      "boxes": 2
+    },
+    {
+      "name": "Aircraft",
+      "boxes": 1
+    },
+    {
+      "name": "Alarm clock",
+      "boxes": 1
+    },
+    {
+      "name": "Bed",
+      "boxes": 1
+    },
+    {
+      "name": "Billiard table",
+      "boxes": 1
+    },
+    {
+      "name": "Blender",
+      "boxes": 1
+    },
+    {
+      "name": "Bronze sculpture",
+      "boxes": 1
+    },
+    {
+      "name": "Bull",
+      "boxes": 1
+    },
+    {
+      "name": "Burrito",
+      "boxes": 1
+    },
+    {
+      "name": "Butterfly",
+      "boxes": 1
+    },
+    {
+      "name": "Cake stand",
+      "boxes": 1
+    },
+    {
+      "name": "Caterpillar",
+      "boxes": 1
+    },
+    {
+      "name": "Cello",
+      "boxes": 1
+    },
+    {
+      "name": "Cheetah",
+      "boxes": 1
+    },
+    {
+      "name": "Crown",
+      "boxes": 1
+    },
+    {
+      "name": "Face powder",
+      "boxes": 1
+    },
+    {
+      "name": "Fish",
+      "boxes": 1
+    },
+    {
+      "name": "Handgun",
+      "boxes": 1
+    },
+    {
+      "name": "Harp",
+      "boxes": 1
+    },
+    {
+      "name": "Harpsichord",
+      "boxes": 1
+    },
+    {
+      "name": "Helicopter",
+      "boxes": 1
+    },
+    {
+      "name": "Hiking equipment",
+      "boxes": 1
+    },
+    {
+      "name": "Hippopotamus",
+      "boxes": 1
+    },
+    {
+      "name": "Hot dog",
+      "boxes": 1
+    },
+    {
+      "name": "Knife",
+      "boxes": 1
+    },
+    {
+      "name": "Measuring cup",
+      "boxes": 1
+    },
+    {
+      "name": "Mixer",
+      "boxes": 1
+    },
+    {
+      "name": "Organ (Musical Instrument)",
+      "boxes": 1
+    },
+    {
+      "name": "Pasta",
+      "boxes": 1
+    },
+    {
+      "name": "Popcorn",
+      "boxes": 1
+    },
+    {
+      "name": "Porch",
+      "boxes": 1
+    },
+    {
+      "name": "Rifle",
+      "boxes": 1
+    },
+    {
+      "name": "Ruler",
+      "boxes": 1
+    },
+    {
+      "name": "Saxophone",
+      "boxes": 1
+    },
+    {
+      "name": "Scale",
+      "boxes": 1
+    },
+    {
+      "name": "Sculpture",
+      "boxes": 1
+    },
+    {
+      "name": "Skirt",
+      "boxes": 1
+    },
+    {
+      "name": "Street light",
+      "boxes": 1
+    },
+    {
+      "name": "Tiara",
+      "boxes": 1
+    },
+    {
+      "name": "Train",
+      "boxes": 1
+    },
+    {
+      "name": "Trombone",
+      "boxes": 1
+    },
+    {
+      "name": "Truck",
+      "boxes": 1
+    },
+    {
+      "name": "Umbrella",
+      "boxes": 1
+    },
+    {
+      "name": "Violin",
+      "boxes": 1
+    },
+    {
+      "name": "Waste container",
+      "boxes": 1
+    },
+    {
+      "name": "Weapon",
+      "boxes": 1
+    },
+    {
+      "name": "Window blind",
+      "boxes": 1
+    }
+  ],
+  "classes_present_count": 315
+}

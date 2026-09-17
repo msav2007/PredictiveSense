@@ -221,7 +221,11 @@ class CocoStore:
         labelled: bool = True,
     ) -> list[int]:
         """Replace every annotation for ``image_id``. Each box is
-        ``{"category": name | "category_id": int, "bbox": [x, y, w, h]}``.
+        ``{"category": name | "category_id": int, "bbox": [x, y, w, h]}``,
+        plus an optional ``"extra": {...}`` dict merged into the stored
+        annotation record verbatim (Stage 5: per-box ``source_class``/
+        ``box_confirmed_by_human`` for a detection-dataset import - additive,
+        never required, never touches the four fixed keys below).
         Records ``seeded`` and sets ``labelled``. Returns the new annotation ids.
         """
 
@@ -249,7 +253,7 @@ class CocoStore:
             if w <= 0 or h <= 0:
                 raise CocoStoreError(f"box for image {image_id} has non-positive size: {box['bbox']}")
             aid = self._alloc_ann_id()
-            self._annotations[aid] = {
+            record: dict[str, Any] = {
                 "id": aid,
                 "image_id": int(image_id),
                 "category_id": cid,
@@ -257,6 +261,10 @@ class CocoStore:
                 "area": round(w * h, 2),
                 "iscrowd": 0,
             }
+            extra = box.get("extra")
+            if extra:
+                record.update(dict(extra))
+            self._annotations[aid] = record
             new_ids.append(aid)
 
         im = self._images[int(image_id)]

@@ -1,0 +1,146 @@
+{
+  "_comment": "Phase 12 section 4.1: explicit, reviewable Open Images V7 -> PredictiveSense class mapping. Every entry is mapped | unavailable | rejected. Derived from results/external_dataset_audit.json (the actual 5000-image download), never assumed. Nothing here is imported until this file exists and is reviewed.",
+  "source_dataset": "open-images-v7",
+  "source_root": "C:\\Users\\mummi\\fiftyone\\open-images-v7",
+  "audit_ref": "results/external_dataset_audit.json",
+  "decisions": [
+    {
+      "ps_class": "watch",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/0gjkl", "name": "Watch"}],
+      "boxes": 222,
+      "images": 189,
+      "reason": "Direct, unambiguous correspondence. Ample sample size for a first training proof."
+    },
+    {
+      "ps_class": "spectacles/glasses",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/0jyfg", "name": "Glasses"}],
+      "boxes": 2975,
+      "images": 2186,
+      "reason": "Direct correspondence, abundant data.",
+      "related_rejected_merges": [
+        {
+          "oi_class": "Sunglasses", "mid": "/m/017ftj", "boxes": 556, "images": 372,
+          "reason_rejected": "Tinted/opaque lenses materially change appearance from clear spectacles; merging would blur what our 'spectacles/glasses' recognition target means. Kept as a distinct, unmapped OI class."
+        },
+        {
+          "oi_class": "Goggles", "mid": "/m/02_n6y", "boxes": 292, "images": 224,
+          "reason_rejected": "A sealed eye-protection object (swimming/lab/sports), not spectacles. Superficially similar name/region, different object. Kept unmapped."
+        }
+      ]
+    },
+    {
+      "ps_class": "headphones",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/01b7fy", "name": "Headphones"}],
+      "boxes": 141,
+      "images": 120,
+      "reason": "Direct correspondence."
+    },
+    {
+      "ps_class": "mug/cup",
+      "status": "mapped",
+      "oi_classes": [
+        {"mid": "/m/02jvh9", "name": "Mug", "boxes": 250, "images": 187},
+        {"mid": "/m/02p5f1q", "name": "Coffee cup", "boxes": 513, "images": 379}
+      ],
+      "merge_decision": "merged",
+      "reason": "Both are generic hand-held drinking vessels, matching the single COCO 'cup' primary-tier concept our own Studio class already collapses to (objects/vocab.py has no separate mug/cup distinction). Merging is an accepted approximation that blurs handle-vs-handleless variation in exchange for more combined training data (763 boxes / ~540 images); revisit if the paper later needs the finer distinction.",
+      "related_rejected": [
+        {"oi_class": "Measuring cup", "mid": "/m/07v9_z", "boxes": 1, "images": 1, "reason_rejected": "Different object (a graduated kitchen tool); also statistically unusable (n=1)."}
+      ]
+    },
+    {
+      "ps_class": "bottle",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/04dr76w", "name": "Bottle"}],
+      "boxes": 3550,
+      "images": 847,
+      "reason": "Direct correspondence, abundant data."
+    },
+    {
+      "ps_class": "bowl",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/04kkgm", "name": "Bowl"}],
+      "boxes": 476,
+      "images": 165,
+      "reason": "Direct correspondence.",
+      "related_rejected_merges": [
+        {
+          "oi_class": "Mixing bowl", "mid": "/m/03hj559", "boxes": 100, "images": 59,
+          "reason_rejected": "A distinct large kitchen utensil (typically deeper, used for food prep, not serving/eating) - different typical scale and context from a plain bowl. Kept unmapped rather than merged."
+        }
+      ]
+    },
+    {
+      "ps_class": "can",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/02jnhm", "name": "Tin can"}],
+      "boxes": 254,
+      "images": 148,
+      "reason": "Exists under a different name than the PS class ('Tin can', not 'Can') - confirmed by reading classes.csv directly rather than assuming absence.",
+      "related_rejected": [
+        {"oi_class": "Can opener", "mid": "/m/02mqfb", "boxes": 0, "images": 0, "reason_rejected": "A different object (a kitchen tool), not a can itself. Zero matches in this download's 5000-image subset regardless."}
+      ]
+    },
+    {
+      "ps_class": "keyboard",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/01m2v", "name": "Computer keyboard"}],
+      "boxes": 578,
+      "images": 409,
+      "reason": "Exists under 'Computer keyboard', not bare 'Keyboard' - confirmed by reading classes.csv.",
+      "related_rejected": [
+        {"oi_class": "Musical keyboard", "mid": "/m/057cc", "boxes": 6, "images": 6, "reason_rejected": "A musical instrument, not a computer peripheral - wrong meaning despite the shared word. Also too few examples (n=6) regardless."}
+      ]
+    },
+    {
+      "ps_class": "phone",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/050k8", "name": "Mobile phone"}],
+      "boxes": 607,
+      "images": 410,
+      "reason": "'Mobile phone' matches our cell-phone-shaped 'phone' concept (mirrors COCO's own 'cell phone' primary-tier class).",
+      "related_rejected": [
+        {"oi_class": "Telephone", "mid": "/m/07cx4", "boxes": 0, "images": 0, "reason_rejected": "A valid OI class in general, but ZERO annotated examples in this specific 5000-image download - unusable regardless of semantics."},
+        {"oi_class": "Corded phone", "mid": "/m/0h8lkj8", "boxes": 5, "images": 4, "reason_rejected": "Landline handset, semantically distinct from a mobile phone, and statistically unusable in this download (n=4 images)."}
+      ]
+    },
+    {
+      "ps_class": "pen",
+      "status": "mapped",
+      "oi_classes": [{"mid": "/m/0k1tl", "name": "Pen"}],
+      "boxes": 214,
+      "images": 136,
+      "reason": "Direct correspondence, confirmed present (a plain 'Pen' class does exist in OI-v7's 601-class vocabulary)."
+    },
+    {
+      "ps_class": "pencil",
+      "status": "unavailable",
+      "oi_classes": [],
+      "reason": "No 'Pencil' class exists anywhere in OI-v7's 601-class vocabulary (classes.csv), matching the download tool's own rejection reported by the developer. Only 'Pencil sharpener' (/m/02ddwp, 0 matches in this download) and 'Pencil case' (/m/05676x, 4 boxes/1 image) exist - neither is a proxy for a pencil itself. Studio-data-only; needs our own collection."
+    },
+    {
+      "ps_class": "charger",
+      "status": "unavailable",
+      "oi_classes": [],
+      "reason": "No matching class exists anywhere in OI-v7's 601-class vocabulary. Studio-data-only; needs our own collection."
+    },
+    {
+      "ps_class": "shaker",
+      "status": "rejected",
+      "oi_classes": [
+        {"mid": "/m/0440zs", "name": "Cocktail shaker", "boxes": 7, "images": 5},
+        {"mid": "/m/02x8cch", "name": "Salt and pepper shakers", "boxes": 0, "images": 0}
+      ],
+      "reason": "Explicitly rejected, not mapped, per the phase instructions: PredictiveSense's own 'shaker' object is recorded (predictivesense/objects/vocab.py CONFUSABLE_SEEDS) as confusable with can/cylinder/bottle - i.e. a generic cylindrical drink/protein shaker - not a two-piece bartending cocktail tool or a table condiment pair. Mapping either OI class would be mapping to something that merely sounds similar, which the phase instructions explicitly forbid. Also both are near-unusable in this download regardless (n=5 images / n=0). Studio-data-only."
+    },
+    {
+      "ps_class": "comb",
+      "status": "unavailable",
+      "oi_classes": [],
+      "reason": "No matching class exists anywhere in OI-v7's 601-class vocabulary (only the unrelated 'Honeycomb', /m/0fz0h). This is the exact class the developer reported as unrecognised - confirms Part A's finding that a Comb classifier can never be trained from this external source; it remains Studio-data-only (currently 2 samples, 1 flagged as a near-duplicate - not enough to train)."
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "per_class_totals": {
+    "mug/cup": {
+      "images": 437,
+      "boxes": 717,
+      "zero_box_images": 0
+    },
+    "watch": {
+      "images": 187,
+      "boxes": 220,
+      "zero_box_images": 0
+    }
+  },
+  "per_class_blur_var": {
+    "mug/cup": {
+      "min": 2.60764,
+      "median": 126.51638,
+      "p95": 1174.75403,
+      "max": 4855.45678
+    },
+    "watch": {
+      "min": 8.8636,
+      "median": 496.15445,
+      "p95": 3169.7589,
+      "max": 5876.19684
+    }
+  },
+  "per_class_box_area_frac": {
+    "mug/cup": {
+      "min": 0.01014,
+      "median": 0.14449,
+      "p95": 0.72773,
+      "max": 0.99844
+    },
+    "watch": {
+      "min": 0.0103,
+      "median": 0.32772,
+      "p95": 0.95019,
+      "max": 0.99875
+    }
+  },
+  "per_class_box_aspect_ratio": {
+    "mug/cup": {
+      "min": 1.0,
+      "median": 1.18845,
+      "p95": 1.81937,
+      "max": 4.58716
+    },
+    "watch": {
+      "min": 1.0,
+      "median": 1.3786,
+      "p95": 2.44595,
+      "max": 4.06667
+    }
+  },
+  "boxes_below_min_area_or_extreme_aspect": 0,
+  "zero_box_images": 11,
+  "license_breakdown": {
+    "https://creativecommons.org/licenses/by/2.0/": 635
+  },
+  "unreadable_images": [],
+  "duplicate_policy": "grouped and kept together in one split, never deleted, except exact byte-duplicates (reported separately, only one copy is meaningful to keep)",
+  "within_class_duplicate_groups": {},
+  "across_class_duplicate_groups": [
+    [
+      175,
+      359
+    ]
+  ],
+  "exact_byte_duplicate_groups": {},
+  "against_eval_duplicates": [],
+  "thresholds": {
+    "blur_var_min": 60.0,
+    "min_box_area_frac": 0.01,
+    "max_aspect_ratio": 6.0,
+    "duplicate_hamming_max": 6
+  }
+}
