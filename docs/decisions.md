@@ -1154,3 +1154,352 @@ Full trace, measurements and physical-verification status:
   currently displayed to measure (no tracks, or no track carries a bound
   pose). Wired into Diagnostics (`groups/diagnostics.js` `PHASE8_METRICS`).
 
+## Phase 11 Part B (training pipeline)
+
+- **2026-09-16** Section 9 trace confirmed the developer's own suspicion
+  exactly: at the start of this phase, the Studio-to-training path stopped at
+  "dataset export" - `scripts/export_objects_coco.py` (COCO detection format)
+  existed; `predictivesense/models/registry.py` had no activation code and no
+  training-vs-validated-vs-active state; there was no training script, no
+  `torch`/`torchvision` dependency anywhere in `pyproject.toml`, and no
+  `scripts/train*.py`. No bug was invented to explain this - the honest
+  finding is "never implemented", per section 9's own instruction.
+- **2026-09-16** Two-stage design adopted as recommended (section 10.1):
+  class-agnostic YOLO detector (unchanged) + a small from-scratch CNN crop
+  classifier (`predictivesense/training/model.py`, 3 conv blocks + GAP +
+  linear head, ~64x64 input) trained in PyTorch and served through ONNX
+  Runtime (`perception/classifier.py`, same `runtime.create_session` /
+  provider-resolution path as the detector and pose estimator - never torch
+  at serve time). Not a torchvision pretrained backbone: at Studio collection
+  scale (tens of images/class) a from-scratch CNN trains in seconds on CPU
+  with no ImageNet-weights download/licence question.
+- **2026-09-16** Training deps (`torch==2.14.0`, `torchvision==0.29.0`,
+  `onnxscript==0.7.2`) live in a new `[train]` optional extra
+  (`pyproject.toml`); `predictivesense/training/*` is the ONLY place they are
+  imported (enforced by `tests/unit/test_no_forbidden_imports.py`'s new
+  `torch`/`torchvision` scoped-import rule and
+  `test_runtime_app_never_imports_torch`, which scans `api/`, `pipeline/`,
+  `perception/`, `camera/`). `torch.onnx.export(..., dynamo=False)`: the
+  newer default (dynamo=True) exporter needs `onnxscript` AND prints a
+  unicode success banner that crashes on a cp1252 Windows console; the legacy
+  TorchScript-based exporter (matching `dynamic_axes`, which the function's
+  own docs say pairs with `dynamo=False`) has neither problem for this small,
+  static-shaped CNN. It is deprecated as of torch 2.9 - re-visit if
+  `torch==2.14.0` is ever bumped past the version where it is removed.
+- **2026-09-16** The custom classifier gets its OWN registry
+  (`predictivesense/training/classifier_registry.py`,
+  `models/classifier_registry.json`) rather than extending
+  `predictivesense/models/registry.py` (the shipped detector's registry).
+  Reason: that registry's `validate()` enforces exactly one active version
+  *globally*, written before a second task ("classify") existed; relaxing it
+  would touch a frozen, heavily-tested invariant for no benefit, when the
+  classifier's lifecycle (trained -> validated -> active -> rollback) is
+  cleanly independent of "which baseline detector ships". "Rollback to
+  baseline" (section 13.4) is `ClassifierRegistry.activate(None)` - no active
+  classify-task entry - which is also the registry's natural starting state,
+  so there is no separate baseline entry to invent or keep in sync.
+- **2026-09-16** Real bug found and fixed while building the split logic
+  (section 11.3): the first version of `training/splits.py` shuffled and cut
+  ONE global pool of capture sessions across all classes. With only a
+  handful of sessions per class this occasionally sent every session of one
+  class to `train`, leaving it **entirely absent** from `test` - the first
+  fixture training run measured `test accuracy=0.0`, which was actually zero
+  test examples for two of three classes, not a bad model (`confusion_matrix`
+  showed all `circle` test crops predicted `triangle` because `square` and
+  `triangle` had no positive test crops at all that run). Fixed by splitting
+  PER CLASS (`object_id`) independently, then merging - every class is
+  guaranteed to appear in every split whenever it has enough sessions.
+  Regression test: `tests/unit/test_training_splits.py::test_every_class_appears_in_every_split_with_enough_sessions`
+  sweeps 10 seeds.
+- **2026-09-16** Session key (section 11.3, "session- and object-disjoint"):
+  `ObjectSample` carries no explicit capture-session id. Derived as
+  `batch_id` when present (a bulk-upload batch IS one session by definition),
+  else `(object_id, device_label, a 900s bucket of captured_utc)` for camera
+  captures - a documented heuristic (`training/dataset.py::session_key_for`),
+  not a measured value. Folding `object_id` into the key makes a session-level
+  split object-disjoint by construction; splitting per class (above) makes it
+  additionally stratified. Re-derive the 900s window if real collection shows
+  distinct sessions closer together than that.
+- **2026-09-16** Role handling (section 11.2): `positive_records()` /
+  `rejection_records()` (`training/dataset.py`) partition strictly - a
+  `hard_negative` or `negative` crop is NEVER handed to the softmax
+  classifier as a labelled positive of its own `object_id` folder (that would
+  silently poison the model into learning the confusable object's pixels
+  under the wrong name). Instead, `rejection_records()` crops are held out
+  and scored only as a false-class rate at evaluation (section 15): does the
+  trained classifier wrongly predict a name in the crop's own `negative_for`
+  list. `tests/unit/test_training_dataset.py::test_hard_negative_never_becomes_a_training_positive`
+  is the explicit regression test section 11.2 asks for.
+- **2026-09-16** Live inference (section 16) is wired into the real-time loop
+  ONLY (`pipeline/loop.py`), not `pipeline/recorded.py` - recorded mode stays
+  exactly as Phase 9/10 left it, so `test_recorded_determinism_with_models.py`
+  needed no change. The active classifier (if any) is resolved ONCE at
+  `AnalysisLoop` construction (`ClassifierRegistry().active()`), exactly like
+  the detector's `model_version` - a classifier trained/activated/rolled back
+  while the app is already running takes effect on the next restart, not
+  live. Stated as a limitation, not silent staleness: the resolved version id
+  is reported via `AnalysisLoop.custom_classifier_version`, `GET
+  /api/runtime`, the session manifest, and Diagnostics.
+- **2026-09-16** The classifier pass is a strictly ADDITIVE, separate step in
+  `AnalysisLoop._run_perception`, run AFTER `RecognitionPolicy.apply()` and
+  touching only two new `Detection` fields (`custom_class_name`,
+  `custom_class_confidence`) - `class_name` / `policy_state` / `tier` /
+  `score` are read, never written, so the recognition policy's own decisions
+  are byte-for-byte identical whether or not a custom classifier is active
+  (section 21 non-goal: "any change to the recognition policy's decisions").
+  Carried onto `Track` the same way as `last_detector_confidence` (set in
+  `TrackState.record_hit`, never decayed/invented while coasting) so the
+  overlay can show it per-track; rendered as a strictly additive badge
+  (`overlay.js`, "learned: `<name>` `<pct>`") stacked above the existing tier
+  badge, never replacing the resting label/colour/dash channels that remain
+  the recognition policy's alone.
+- **2026-09-16** `tests/browser/test_studio_bulk_upload.py::test_no_text_claims_the_model_learned_or_was_trained`
+  predates Part B and originally banned the bare words "trained"/"learned"
+  anywhere on the page. Section 14.1 now requires an honest, factual
+  training-pipeline-status readout that legitimately contains those words
+  ("no versions trained", "N/M classes dataset-ready"). Loosened to ban
+  specific DECEPTIVE PHRASES stated as present-tense fact about live
+  capability ("has learned", "is trained", "now recognises") rather than the
+  bare words - the distinction the section itself draws ("never display
+  ... for a class whose model has not been trained and activated" - an
+  honest report that nothing is trained is the opposite of that claim). New
+  `tests/browser/test_studio_flow.py::test_capturing_a_sample_never_claims_the_class_is_learned_or_trained`
+  covers the same phrase list after an actual camera capture.
+- **2026-09-16** `predictivesense/training/classifier_registry.py` resolves
+  its default path from the repo root (`models/classifier_registry.json`),
+  matching the existing detector `ModelRegistry`'s precedent (also
+  repo-root-relative, not `config`-scoped) rather than adding a new config
+  field. Known limitation carried forward openly: this means the classifier
+  registry is NOT isolated by `tests/browser/conftest.py`'s per-test
+  `seeded_objects_root` the way `objects.root` is - browser tests must not
+  assert exact trained-version counts/names (only the absence of deceptive
+  phrasing), and a real multi-installation deployment sharing one checkout
+  would share one classifier registry too. Revisit with a config field if
+  that ever matters in practice.
+- **2026-09-16** Baseline-vs-custom (section 15,
+  `scripts/evaluate_classifier_baseline.py`,
+  `results/baseline_vs_custom_fixture.md`): on the synthetic fixture's held-out
+  test split, the custom classifier reaches 1.000 accuracy / 0.0 false-class
+  rate at ~1.2ms/crop; the baseline (the existing pretrained COCO-80 detector,
+  which has no concept of these classes at all) reaches 0.0 accuracy at
+  ~46ms/crop, naming a `circle` crop `"orange"`/nothing, a `square` crop
+  `"tv"`, a `triangle` crop nothing. This is the expected, honest result
+  (section 15: "if it is worse, that is the result, and it is publishable"),
+  not a baseline-evaluator bug - COCO-80 was never going to contain a
+  Studio-enrolled custom class's name. Latency reported separately from
+  accuracy throughout, never blended into one score.
+
+## Phase 12 - external dataset import + proven one-class training path
+
+- **2026-09-16** Part A trace: the Comb the developer saved in the Studio
+  reached the sample store fine (`data/objects/comb/manifest.json`, 2
+  positives, 1 flagged `near_duplicate`), but the two classifier artifacts
+  that existed in `models/classifier_registry.json` before this phase were
+  BOTH trained on Phase 11's synthetic fixture (`class_map`
+  `{circle, square, triangle}`, `notes` pointing at
+  `...\ps_train_fixture_*\objects` temp dirs) - i.e. test/dev-command
+  leakage, never a real training run on Comb or any other real class - and
+  neither was active. The live app was therefore still the pretrained
+  baseline detector, whose fixed COCO-80 vocabulary structurally cannot
+  emit "comb" at all (`perception/vocabulary.py` partitions exactly
+  COCO-80); the Phase 11 custom-classifier pass is additive on top of
+  already-detector-proposed, already-policy-accepted boxes
+  (`pipeline/loop.py::_apply_custom_classifier`), so even a trained-but-never
+  activated Comb classifier could not have helped. **No bug was found in
+  the recognition path** - this is exactly the expected "no custom model
+  has ever been trained" finding (Phase 12 prompt section 2.3). The two
+  stray fixture artifacts and their `models/custom/` directories were
+  removed from the production registry (they were test/dev leakage, not
+  real work, and untracked by git); `models/classifier_registry.json` was
+  reset to an empty registry before Part C trained anything real.
+
+- **2026-09-16** External dataset audit (`scripts/audit_external_dataset.py`,
+  `results/external_dataset_audit.json`/`.md`): the FiftyOne export's
+  `detections.csv` and `metadata/image_ids.csv` are each the FULL,
+  multi-split Open Images V7 master files, NOT pre-filtered to this
+  download's 5000 images (confirmed: the first master-CSV row's `ImageID`
+  does not appear in this download's `train/data/`) - both scripts filter
+  by the actual on-disk image IDs before computing any count, never trust
+  the raw file's apparent scope. Real numbers from the actual 5000-image
+  subset: Watch 222 boxes/189 images, Glasses 2975/2186, Bottle 3550/847,
+  Mobile phone 607/410, Computer keyboard 578/409, Tin can 254/148, Pen
+  214/136, Coffee cup 513/379, Mug 250/187, Bowl 476/165, Headphones
+  141/120; Comb has zero matches anywhere in the 601-class OI vocabulary
+  (only the unrelated "Honeycomb").
+
+- **2026-09-16** Class mapping (`results/external_class_mapping.json`,
+  section 4): corrects two of the Phase 12 prompt's own stated
+  expectations on evidence - `pen` and `can` are BOTH present in OI-v7
+  (as `Pen` and `Tin can` respectively; a first pass missed them with an
+  overly-narrow regex and was corrected by re-reading `classes.csv`
+  directly). `shaker` is explicitly REJECTED rather than mapped to
+  `Cocktail shaker`/`Salt and pepper shakers`: this project's own `shaker`
+  object is recorded (`predictivesense/objects/vocab.py`
+  `CONFUSABLE_SEEDS`) as confusable with can/cylinder/bottle - a generic
+  cylindrical container - not a bartending tool or a condiment pair, and
+  both OI candidates are also near-unusable in this download (n=5 images /
+  n=0) regardless. `mug`/`cup` merges two OI classes (Mug + Coffee cup)
+  into one PS class - an accepted approximation, recorded as blurring the
+  handle-vs-handleless distinction. Sunglasses/Goggles are NOT merged into
+  `spectacles/glasses` (materially different appearance/function).
+  Mixing bowl is NOT merged into `bowl`. `pencil`, `charger`, `comb`
+  confirmed unavailable from OI-v7 by direct inspection of its 601-class
+  vocabulary, not assumed.
+
+- **2026-09-16** Storage: `data/external/<source>/<ps_class>/manifest.json`
+  is a NEW, third store (`predictivesense.config.settings.ExternalDatasetConfig`,
+  default `data/external/`), strictly separate from `objects.root` and
+  `dataset.root`. Images are never copied - each sample's `image_path`
+  references the original FiftyOne-downloaded file by absolute path plus a
+  SHA-256 of its bytes (section 5.3); only the manifest, hashes and
+  `results/external_class_mapping.json` are ever committed
+  (`data/external/` is git-ignored). `scripts/import_external_dataset.py`
+  computes a cross-store collision check before writing anything: an exact
+  SHA-256 or near-duplicate (dHash, Hamming <= 6, the same threshold and
+  algorithm as `objects/quality.py`) match against `data/eval` **aborts the
+  whole import, nothing written**; a match against `data/objects` instead
+  excludes just that one image and is reported loudly in
+  `rejected_reasons`. No collision occurred against the real `data/objects`
+  (2 Comb images) or `data/eval` (34 unlabelled Phase 2.5 frames) for the
+  real Watch import.
+
+- **2026-09-16** Integration reuses the Phase 11 pipeline exactly, per
+  section 9.1 - no parallel pipeline was built. `training/dataset.py`'s
+  `CropRecord` already carried an unused `source` field; external samples
+  set it to `"external:<source>"` and get a session key of
+  `f"{object_id}:ext:{source}:{image_id}"` - image-disjoint by
+  construction (every box drawn from one image shares one session), so
+  `training/splits.py`'s existing per-class session-shuffle-and-cut needed
+  **zero changes** to become source-and-image-disjoint too.
+  `DatasetSummary` gained one new field, `per_source_counts` (source ->
+  {class: count}), computed the same way `per_class_counts` already was;
+  it flows into the run manifest via the existing `dataset_summary` key,
+  satisfying section 9.2's composition-reporting requirement additively.
+  `predictivesense/training/dataset.py` remains stdlib-only (reads a
+  manifest with plain `json`) - the `pandas`/`external` dependency stays
+  confined to `scripts/audit_external_dataset.py` /
+  `scripts/import_external_dataset.py`, enforced by adding `fiftyone` and
+  `pandas` to `tests/unit/test_no_forbidden_imports.py`'s
+  `FORBIDDEN_MODULES` (never allowed anywhere under `predictivesense/`).
+
+- **2026-09-16** Proving class: the audit strongly supports the prompt's
+  own recommendation of `watch` (189 external images, largest usable
+  candidate after Bottle/Glasses which are not the chosen proof). However,
+  the Studio's own `watch` object had ALREADY been created and then
+  soft-deleted earlier in this session (`data/objects/_deleted/watch*`,
+  no restore feature exists by design - deletion is one-way), leaving
+  ZERO active Studio watch samples; `comb`'s own 2 samples (1 flagged a
+  near-duplicate, 0 negatives) are far below any usable threshold. Given a
+  direct choice put to the developer (train external-only and honestly
+  report the "no held-out data of our own" gap for `watch`, vs.
+  resurrecting the deleted samples by manually moving files outside the
+  app's own soft-delete UX, vs. proving on `comb` instead), the developer
+  chose **watch, external-only, gap reported**. Trained with
+  `objects_root` pointed at an empty directory (no Studio contribution at
+  all) plus the real `data/external/open-images-v7/watch/manifest.json`
+  (220 positive Watch crops from 187 images) and 40 hard-negative crops
+  drawn from `Mobile phone` boxes in images that do NOT also contain a
+  Watch box (`--hard-negative-mid`/`--hard-negative-limit`, a new, generic
+  importer feature - never limited to `watch`).
+
+- **2026-09-16** Section 10.4/10.5 result, reported honestly rather than
+  massaged: `crop-clf-2026-09-16T1404-78a4bdb3` (class_map `{"watch": 0}`)
+  scores accuracy 1.0 and false_class_rate **1.0** on its held-out test
+  split (44 positive Watch crops, 6 Mobile-phone hard-negative crops).
+  Both numbers are mathematically forced, not evidence of good or bad
+  training: a single-class closed-set softmax has exactly one possible
+  output, so it is trivially "always right" about its one class (accuracy)
+  and trivially "always wrong" about anything else (false-class rate) -
+  this is the architectural ceiling of proving ONE class in isolation
+  (section 10.6 forbids scaling to more classes this phase), not a claim
+  about how a future multi-class watch/phone/mug/... model would perform.
+  `scripts/validate_object_classifier.py`'s default
+  `--max-false-class-rate 0.5` gate (sized for an eventual multi-class
+  deployment) was explicitly overridden to `1.0` for this one validation
+  call, with this exact reasoning recorded here rather than quietly
+  lowering the default - the alternative (dropping the hard-negative
+  examples entirely so `n_rejection_examples=0` and the rate reports a
+  vacuous 0.0) would have hidden a real, honest limitation instead of
+  measuring it, so it was rejected. **Because there is no held-out watch
+  data of our own** (see the proving-class entry above), no
+  "baseline-vs-custom on our own data" number could be produced for watch
+  this phase - the only accuracy figures for this run are against the
+  external test split, and must not be read as evidence about this
+  cabin's cameras (section 9.3's domain-gap warning applies in full,
+  amplified by having no local data to check it against at all).
+
+- **2026-09-16** `predictivesense/training/classifier_registry.py`'s
+  test-isolation gap (recorded above, Phase 11 Part B) is now closed for
+  the wiring that matters: a new `AppConfig.training.classifier_registry_path`
+  field (default `models/classifier_registry.json`, byte-identical to the
+  previous hardcoded path) lets `pipeline/loop.py::_resolve_active_classifier`,
+  `api/objects.py`'s `training_status` endpoint, and all three CLI scripts
+  (`train_object_classifier.py`, `validate_object_classifier.py`,
+  `activate_object_classifier.py`) resolve the registry the same
+  config-driven way `objects.root` already does. This was not a
+  theoretical concern: activating a real classifier in production for the
+  first time this phase immediately broke two existing integration tests
+  (`test_tracker_wiring.py`, previously silent because no classifier had
+  ever been active in production before) by making `AnalysisLoop`
+  auto-load and run the real ONNX classifier inside timing-sensitive
+  tests. Fixed at the root: `tests/conftest.py`'s shared `dev_config` /
+  `eval_config` / `browser_config` / `perception_dev_config` fixtures now
+  isolate `training.classifier_registry_path` to a path that never exists
+  by default (`_isolate_classifier_registry`), and the handful of test
+  files that call `load_config("dev")` directly instead of through those
+  fixtures (`test_tracker_wiring.py`, `test_staleness_guard.py`,
+  `test_custom_classifier_wiring.py`, `test_perception_frame_parity.py`)
+  were each given the same explicit override.
+
+- **2026-09-16** Environment-contamination incident, found while chasing
+  the above test failures' root cause and worth recording so it is never
+  repeated: `fiftyone` (used only for the original manual Open Images
+  download) had been `pip install`-ed directly into this project's shared
+  `.venv`, which silently upgraded `starlette` to `1.3.1` to satisfy
+  `fiftyone`'s own requirement (`starlette<1.4,>=1.3.1`) - incompatible
+  with the pinned `fastapi==0.115.6` (`starlette<0.42.0`), breaking
+  `Router.__init__()` with `TypeError: unexpected keyword argument
+  'on_startup'` and silently failing collection of EVERY integration test
+  that imports `predictivesense.api.app` (i.e. most of the suite) before
+  this phase's own changes ran a single test. Fixed by reinstalling
+  `starlette==0.41.3` (fastapi's own compatible range). **`fiftyone` will
+  no longer import/run correctly in this venv** - acceptable, since
+  nothing under `predictivesense/` or `scripts/audit_external_dataset.py`/
+  `scripts/import_external_dataset.py` imports it (by design, section
+  9.4) and the one-time download it was needed for is already done.
+  **Strong recommendation, not yet acted on**: install `fiftyone` (and any
+  future external-dataset tooling) into a completely separate venv from
+  now on, never this project's `.venv` - this incident is the concrete
+  proof of exactly the risk section 9.4 was written to prevent.
+
+- **2026-09-16** Latency-floor re-check (section 11) was attempted but
+  came back **inconclusive, not clean** - recorded honestly rather than
+  either claimed or hidden. Three `scripts/benchmark_latency.py --source
+  data/raw` runs on this same sandboxed VM, back-to-back, showed the
+  DETECTOR stage alone (unchanged by this phase, no code touched)
+  vary 37ms -> 113ms -> 228ms p50 - session-level machine-load drift far
+  larger than any plausible classifier cost, making a clean before/after
+  comparison from this script impossible this session
+  (`results/latency_stages_phase12_*.md`, kept as-is for the honest
+  record). The classifier's own per-crop cost IS measured, just not by
+  this script: `evaluate_predictor` reported 0.939ms mean / 1.259ms p95
+  per crop during training on this same machine (now in
+  `models/classifier_registry.json`'s `metrics` block) - negligible next
+  to the 40-250ms detector/pose stages, and the pass only executes at all
+  when >=1 detection is already `accepted`/`accepted_secondary`
+  (`pipeline/loop.py` line ~786's guard). **Not verified**: a clean,
+  quiet-machine A/B re-run is left for the developer's physical
+  verification (section 13) rather than reported as a false "floor
+  intact" claim from noisy data.
+
+- **2026-09-16** `.gitignore` gap found and fixed: `models/*` is
+  blanket-ignored with explicit exceptions for `models/manifest.json` and
+  `models/registry.json` (the detector's registry), but Phase 11 never
+  added the analogous exception for `models/classifier_registry.json` -
+  meaning every classifier training/validation/activation this phase (and
+  Phase 11's own, had they been real) would have been silently untracked
+  by git. Added `!models/classifier_registry.json`; the actual `.onnx`
+  artifacts under `models/custom/` remain git-ignored on purpose, same as
+  the detector's own weights - only the registry's metadata (paths,
+  hashes, metrics) is source-of-truth-tracked.
+

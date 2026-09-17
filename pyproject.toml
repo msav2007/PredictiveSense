@@ -61,6 +61,34 @@ dev = [
 camera = [
     "pygrabber==0.2",
 ]
+# Phase 11 Part B: training the Object Learning Studio's crop classifier.
+# ONLY `predictivesense/training/*` imports torch/torchvision - the runtime app
+# (pipeline/, api/) never does, so a serving-only environment need not install
+# this extra. Serving a trained model goes through ONNX Runtime
+# (perception/classifier.py), same as the detector and pose estimator, not
+# through this extra. CPU wheels (`--index-url https://download.pytorch.org/whl/cpu`)
+# keep this small and avoid pulling a CUDA runtime on the CPU-only dev machine;
+# CUDA is used automatically when torch itself is installed with CUDA support
+# and reports it (see `training/train.py::_machine_fingerprint`/provider field).
+train = [
+    "torch==2.14.0",
+    "torchvision==0.29.0",
+    # torch.onnx.export's default (dynamo) exporter needs this - training-only,
+    # never imported by the serving path (perception/classifier.py uses plain
+    # onnxruntime).
+    "onnxscript==0.7.2",
+]
+# Phase 12: importing an external dataset (e.g. a FiftyOne Open Images V7
+# export) into data/external/. ONLY scripts/audit_external_dataset.py and
+# scripts/import_external_dataset.py use pandas - predictivesense/ itself
+# never does (enforced by tests/unit/test_no_forbidden_imports.py), and the
+# fiftyone package itself is never imported anywhere in this repo: both
+# scripts read the raw exported CSV/JSON files FiftyOne wrote to disk
+# directly, so fiftyone is not even a dependency of the import path, only of
+# the one-time manual download the developer already did.
+external = [
+    "pandas==3.0.5",
+]
 
 [tool.setuptools.packages.find]
 include = ["predictivesense*"]
@@ -82,4 +110,6 @@ markers = [
     "dataset: requires the labelled evaluation set under data/eval/; skips cleanly when it is absent",
     "browser: drives the real app in headless Chromium via Playwright; skips cleanly when Playwright or its browser binary is absent",
     "cuda: requires an onnxruntime build with CUDAExecutionProvider; skips cleanly when it is absent, runs on the NVIDIA machine",
+    "train: requires the [train] extra (torch/torchvision); skips cleanly when it is absent",
+    "external: requires the downloaded external dataset under data/external/ or a raw FiftyOne export; skips cleanly when absent",
 ]

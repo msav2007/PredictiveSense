@@ -87,6 +87,30 @@ _PERCEPTION_MODELS = [
 ]
 
 
+_NO_CLASSIFIER_REGISTRY_FOR_TESTS = Path("__no_classifier_registry_for_tests__.json")
+
+
+def _isolate_classifier_registry(cfg: AppConfig) -> AppConfig:
+    """Point ``training.classifier_registry_path`` at a path that never
+    exists (Phase 12). Without this, any test that constructs an
+    ``AnalysisLoop``/hits the training-status API without an explicit
+    ``classifier=`` override would silently auto-resolve whatever a real
+    developer machine happens to have trained and activated in the shared,
+    NOT test-isolated ``models/classifier_registry.json`` (the exact gap
+    documented in ``docs/decisions.md`` Phase 11 Part B) - loading and
+    running a real ONNX classifier where a test expects none, and breaking
+    timing-sensitive assertions. A test that wants the real classifier
+    registry overrides this field again itself."""
+
+    return cfg.model_copy(
+        update={
+            "training": cfg.training.model_copy(
+                update={"classifier_registry_path": _NO_CLASSIFIER_REGISTRY_FOR_TESTS}
+            )
+        }
+    )
+
+
 def _without_perception(cfg: AppConfig) -> AppConfig:
     """Disable perception on a config.
 
@@ -96,12 +120,14 @@ def _without_perception(cfg: AppConfig) -> AppConfig:
     ``tests/unit/test_config.py`` - this only affects the shared fixtures.
     """
 
-    return cfg.model_copy(
-        update={
-            "perception": cfg.perception.model_copy(
-                update={"detection_enabled": False, "pose_enabled": False}
-            )
-        }
+    return _isolate_classifier_registry(
+        cfg.model_copy(
+            update={
+                "perception": cfg.perception.model_copy(
+                    update={"detection_enabled": False, "pose_enabled": False}
+                )
+            }
+        )
     )
 
 
@@ -129,7 +155,7 @@ def browser_config() -> AppConfig:
 def perception_dev_config() -> AppConfig:
     """``dev`` profile with perception left ON (models-marked tests)."""
 
-    return load_config("dev")
+    return _isolate_classifier_registry(load_config("dev"))
 
 
 @pytest.fixture()
@@ -142,6 +168,34 @@ def require_models() -> None:
             f"perception weights absent ({', '.join(missing)}); "
             f"run `python scripts/fetch_models.py`"
         )
+
+
+@pytest.fixture()
+def require_train() -> None:
+    """Skip cleanly (never fail) when the [train] extra (torch/torchvision) is
+    absent - the serving app never needs it, only `predictivesense/training/*`."""
+
+    try:
+        import torch  # noqa: F401
+        import torchvision  # noqa: F401
+    except ImportError:
+        pytest.skip("the [train] extra (torch/torchvision) is not installed")
+
+
+@pytest.fixture()
+def require_external():
+    """Skip cleanly when Phase 12's external-dataset import has not been run
+    in this environment (the raw FiftyOne download and the [external] extra
+    are developer-machine-only; the suite must never fail merely because
+    neither exists here)."""
+
+    manifest = _REPO_ROOT / "data" / "external" / "open-images-v7" / "watch" / "manifest.json"
+    if not manifest.is_file():
+        pytest.skip(
+            f"no external dataset import found at {manifest}; run "
+            f"`python scripts/import_external_dataset.py --class watch`"
+        )
+    return manifest
 
 
 _EVAL_STORE = _REPO_ROOT / "data" / "eval" / "annotations.json"

@@ -20,6 +20,11 @@
       </div>
       <div class="st-right">
         <span class="st-model" id="active-model" title="Active model version (read-only)">model —</span>
+        <!-- Phase 11 Part B section 14.1: the REAL Studio-to-trained-model
+             pipeline state - never claims "learned"/"trained"/"recognises"
+             for a class that has not actually been trained and activated
+             (section 14.2). Populated by loadTrainingStatus() in studio.js. -->
+        <span class="st-model" id="training-status" title="Object Learning Studio training pipeline status">training: —</span>
         <a class="btn btn-secondary" id="btn-return" href="/">Save and return</a>
       </div>
     </header>

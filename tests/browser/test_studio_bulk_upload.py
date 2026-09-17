@@ -183,6 +183,13 @@ def test_save_all_with_one_unresolved_reports_both_counts(
 def test_no_text_claims_the_model_learned_or_was_trained(
     live_server: str, page: Page, bulk_object, tmp_path, console
 ) -> None:
+    # Phase 11 Part B added an HONEST training-pipeline-status readout
+    # (section 14.1) that legitimately uses the words "trained"/"training" as
+    # factual state ("no versions trained", "N/M classes dataset-ready") - the
+    # bar this test enforces is no longer "the bare word never appears" but
+    # "no DECEPTIVE claim that the currently-running model changed", i.e. an
+    # assertion phrased as present-tense fact about live capability. A bulk
+    # upload updates training DATA only and must never imply more than that.
     open_studio(page, live_server)
     select(page, bulk_object)
     page.set_input_files("#bulk-upload-input", _fixture_images(tmp_path, 2))
@@ -195,7 +202,10 @@ def test_no_text_claims_the_model_learned_or_was_trained(
     expect(page.locator("#batch-note")).to_contain_text("saved")
 
     body_text = page.locator("body").inner_text().lower()
-    for claim in ("learned", "trained", "recognises now", "recognizes now", "now recognises", "now recognizes"):
+    for claim in (
+        "has learned", "was trained", "is trained", "recognises now", "recognizes now",
+        "now recognises", "now recognizes", "model learned",
+    ):
         assert claim not in body_text, f"page implies the model changed: {claim!r}"
     console.assert_clean()
 

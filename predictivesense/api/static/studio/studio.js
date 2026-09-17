@@ -226,6 +226,10 @@ async function loadObjects() {
   const r = await fetch("/api/objects");
   const body = await r.json();
   state.objects = body.objects || [];
+  // Refresh the honest pipeline-state readout every time the object/sample
+  // list changes (section 14.1) - cheap, and every save/upload path already
+  // calls loadObjects(), so this needs no extra call sites.
+  loadTrainingStatus();
   const list = $("object-list");
   // Rows carry no per-node listener: `loadObjects()` calls `replaceChildren`
   // on every refresh, so a per-row binding would be orphaned on the next
@@ -880,6 +884,36 @@ async function loadModelBadge() {
       : `model registry unavailable: ${body.reason || "?"}`;
   } catch {
     /* ignore */
+  }
+}
+
+/* Phase 11 Part B section 14.1/14.2: the REAL Studio-to-trained-model
+ * pipeline state, from GET /api/objects/training_status. Deliberately factual
+ * ("N classes ready", "0 trained versions", "active: crop-clf-...") - never
+ * "learned" / "recognises" / "trained" as a claim about what the running app
+ * can currently do, since collecting samples alone changes none of that. */
+async function loadTrainingStatus() {
+  const el = $("training-status");
+  if (!el) return;
+  try {
+    const r = await fetch("/api/objects/training_status");
+    if (!r.ok) throw new Error(String(r.status));
+    const body = await r.json();
+    const classCount = Object.keys(body.classes || {}).length;
+    const readyCount = Object.values(body.classes || {}).filter((c) => c.ready_for_training).length;
+    const trainedCount = (body.trained_versions || []).length;
+    const active = body.active_classifier;
+    const parts = [
+      `${readyCount}/${classCount} classes dataset-ready`,
+      trainedCount ? `${trainedCount} version(s) trained` : "no versions trained",
+      active ? `active: ${active.version_id}` : "no classifier active (baseline)",
+    ];
+    el.textContent = `training: ${parts.join(" · ")}`;
+    el.title = active
+      ? `Active custom classifier ${active.version_id}, classes: ${active.classes.join(", ")}`
+      : "No custom classifier is active - recognition is the baseline detector only";
+  } catch {
+    el.textContent = "training: unavailable";
   }
 }
 

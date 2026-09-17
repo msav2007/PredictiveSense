@@ -8,6 +8,7 @@ no threads, no real perception, no camera.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -30,6 +31,10 @@ def _loop(max_frame_age_ms: float) -> AnalysisLoop:
         ),
         "analysis": cfg.analysis.model_copy(
             update={"max_frame_age_ms": max_frame_age_ms}
+        ),
+        # Phase 12: never auto-resolve a real production classifier here.
+        "training": cfg.training.model_copy(
+            update={"classifier_registry_path": Path("__no_classifier_registry_for_tests__.json")}
         ),
     })
     src = create_frame_source(cfg.source)

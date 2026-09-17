@@ -15,7 +15,6 @@ PACKAGE_ROOT = Path(predictivesense.__file__).resolve().parent
 
 # Never allowed anywhere in the package.
 FORBIDDEN_MODULES = {
-    "torch",
     "openvino",
     "mediapipe",
     "ultralytics",
@@ -24,21 +23,35 @@ FORBIDDEN_MODULES = {
     "aiohttp",
     "pyttsx3",
     "aiortc",
+    # Phase 12 section 9.4: external-dataset dependencies are confined to
+    # scripts/audit_external_dataset.py and scripts/import_external_dataset.py
+    # (outside this scanned tree) - predictivesense/ itself (runtime AND
+    # training) must never need them.
+    "fiftyone",
+    "pandas",
 }
 # Submodule imports that must also be caught.
 FORBIDDEN_QUALIFIED = {"urllib.request"}
 
 # Allowed, but only within the listed subpackages.
-#   cv2         - Phase 1 camera / file / codec  +  Phase 2 perception (letterbox,
-#                 JPEG decode for the audit fixture path).
-#   onnxruntime - Phase 2 perception only. `scripts/` is not part of the package
-#                 tree scanned here, so the setup / benchmark / audit scripts are
-#                 excluded from this runtime guard by path.
+#   cv2          - Phase 1 camera / file / codec  +  Phase 2 perception (letterbox,
+#                  JPEG decode for the audit fixture path)  +  Phase 11 training
+#                  (crop decode/resize and the synthetic fixture generator).
+#   onnxruntime  - Phase 2 perception only. `scripts/` is not part of the package
+#                  tree scanned here, so the setup / benchmark / audit scripts are
+#                  excluded from this runtime guard by path.
+#   torch        - Phase 11 `predictivesense/training/` ONLY (section 12.5: the
+#                  runtime app - api/, pipeline/, perception/ - must never require
+#                  it; serving a trained model goes through onnxruntime instead,
+#                  see perception/classifier.py, which does not import torch).
 CAMERA_DIR = PACKAGE_ROOT / "camera"
 PERCEPTION_DIR = PACKAGE_ROOT / "perception"
+TRAINING_DIR = PACKAGE_ROOT / "training"
 SCOPED_MODULES = {
-    "cv2": (CAMERA_DIR, PERCEPTION_DIR),
+    "cv2": (CAMERA_DIR, PERCEPTION_DIR, TRAINING_DIR),
     "onnxruntime": (PERCEPTION_DIR,),
+    "torch": (TRAINING_DIR,),
+    "torchvision": (TRAINING_DIR,),
 }
 # Back-compat alias for the cv2-only helper tests below.
 CAMERA_ONLY_MODULES = {"cv2"}
@@ -139,6 +152,27 @@ def test_synthetic_cv2_violation_outside_camera_is_detected() -> None:
     assert _scan_for_module("import cv2\n", str(fake_non_camera_file), "cv2")
     assert _scan_for_module("from cv2 import VideoCapture\n", str(fake_non_camera_file), "cv2")
     assert not _scan_for_module("import numpy as np\n", str(fake_non_camera_file), "cv2")
+
+
+def test_torch_is_actually_used_under_training() -> None:
+    used = any(
+        _scan_for_module(p.read_text(encoding="utf-8"), str(p), "torch")
+        for p in sorted(TRAINING_DIR.rglob("*.py"))
+    )
+    assert used, "expected at least one torch import under predictivesense/training/"
+
+
+def test_runtime_app_never_imports_torch() -> None:
+    # Section 12.5: the runtime environment (serving) must never require torch
+    # - only predictivesense/training/ (a training run) does. Serving a
+    # trained model goes through onnxruntime (perception/classifier.py).
+    runtime_dirs = (PACKAGE_ROOT / "api", PACKAGE_ROOT / "pipeline", PERCEPTION_DIR, CAMERA_DIR)
+    offenders: list[str] = []
+    for base in runtime_dirs:
+        for path in sorted(base.rglob("*.py")):
+            if _scan_for_module(path.read_text(encoding="utf-8"), str(path), "torch"):
+                offenders.append(str(path.relative_to(PACKAGE_ROOT)))
+    assert not offenders, "torch imported outside predictivesense/training/:\n" + "\n".join(offenders)
 
 
 def test_core_does_not_depend_on_api_pipeline_or_camera() -> None:

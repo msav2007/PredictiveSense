@@ -33,6 +33,10 @@ def cadence_config(perception_dev_config):
         "analysis": perception_dev_config.analysis.model_copy(
             update={"max_frame_age_ms": 0.0}
         ),
+        # Phase 12: never auto-resolve a real production classifier here.
+        "training": perception_dev_config.training.model_copy(
+            update={"classifier_registry_path": Path("__no_classifier_registry_for_tests__.json")}
+        ),
     })
 
 

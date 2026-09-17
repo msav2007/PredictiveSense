@@ -277,3 +277,42 @@ def test_fake_camera_capture_stores_full_res_original_and_separate_thumbnail(
     print(f"[phase6] fake-camera achieved_resolution = {sample['achieved_resolution']}, "
           f"capture_path = {sample['capture_path']}")
     console.assert_clean()
+
+
+# --------------------------------------------------------------------------
+# Phase 11 Part B section 14.2 - uploading samples must never claim a class
+# has been "learned" / "trained" / can be "recognised" - that is only ever
+# true after an explicit train -> validate -> activate, none of which a
+# camera capture or upload triggers.
+# --------------------------------------------------------------------------
+
+
+def test_capturing_a_sample_never_claims_the_class_is_learned_or_trained(
+    live_server: str, page: Page, console
+) -> None:
+    open_studio(page, live_server)
+    select_object(page, CUP)
+    wait_for_camera(page)
+    page.locator("#btn-capture").click()
+
+    sample = None
+    for _ in range(40):
+        r = page.request.get(f"{live_server}/api/objects/{CUP}")
+        samples = r.json().get("samples", [])
+        if samples:
+            sample = samples[0]
+            break
+        time.sleep(0.2)
+    assert sample is not None, "capture produced no sample"
+
+    page.wait_for_timeout(300)  # let loadTrainingStatus()'s fetch settle
+    body_text = page.locator("body").inner_text().lower()
+    for forbidden in ("has learned", "is trained", "now recognises", "now recognizes", "model learned"):
+        assert forbidden not in body_text, (
+            f"false claim {forbidden!r} found after upload - a capture/upload must never imply "
+            "training happened"
+        )
+    # The honest pipeline-status readout is present and is factual, not a claim.
+    expect(page.locator("#training-status")).to_be_visible()
+    expect(page.locator("#training-status")).not_to_have_text("training: —")
+    console.assert_clean()

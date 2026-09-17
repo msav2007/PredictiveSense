@@ -226,6 +226,62 @@ async def get_vocab() -> dict[str, Any]:
     }
 
 
+@router.get("/api/objects/training_status")
+async def get_training_status(request: Request) -> dict[str, Any]:
+    """Phase 11 Part B section 14.1 - the REAL pipeline state, nothing
+    inferred or claimed. ``classes`` reports collection status per object
+    (uploading samples updates training data and nothing else -
+    ``ready_for_training`` is a simple count threshold, never a claim that
+    anything has been learned). ``trained_versions`` / ``active_classifier``
+    come straight from the classifier registry - empty/``None`` until a
+    developer actually runs ``scripts/train_object_classifier.py``."""
+
+    try:
+        reg = _registry(request)
+        profiles = reg.list()
+    except ObjectStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    min_positives = _targets(request).min_positives
+    classes: dict[str, Any] = {}
+    for p in profiles:
+        store = SampleStore(reg.object_dir(p.object_id), p.object_id)
+        counts = store.counts()
+        classes[p.object_id] = {
+            "positive_count": counts["positive_count"],
+            "negative_count": counts["negative_count"],
+            "ready_for_training": counts["positive_count"] >= min_positives,
+        }
+
+    trained_versions: list[dict[str, Any]] = []
+    active_classifier: dict[str, Any] | None = None
+    try:
+        from pathlib import Path as _Path
+
+        from predictivesense.training.classifier_registry import ClassifierRegistry
+
+        _repo_root = _Path(__file__).resolve().parents[2]
+        clf_reg = ClassifierRegistry(path=_repo_root / request.app.state.config.training.classifier_registry_path)
+        for v in clf_reg.list():
+            trained_versions.append({
+                "version_id": v.version_id, "created_utc": v.created_utc,
+                "classes": sorted(v.class_map), "validated": v.validated, "active": v.active,
+                "test_accuracy": v.metrics.get("accuracy"),
+            })
+        active = clf_reg.active()
+        if active is not None:
+            active_classifier = {"version_id": active.version_id, "classes": sorted(active.class_map)}
+    except Exception as exc:  # noqa: BLE001 - registry absent/corrupt -> report empty, never crash
+        _LOG.debug("classifier registry unavailable for training_status: %r", exc)
+
+    return {
+        "classes": classes,
+        "dataset_ready": any(c["ready_for_training"] for c in classes.values()),
+        "trained_versions": trained_versions,
+        "active_classifier": active_classifier,
+    }
+
+
 @router.get("/api/objects")
 async def list_objects(request: Request) -> dict[str, Any]:
     try:

@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "versions": [
+    {
+      "version_id": "crop-clf-2026-09-16T1404-78a4bdb3",
+      "created_utc": "2026-09-16T14:04:04.456880Z",
+      "class_map": {
+        "watch": 0
+      },
+      "dataset_content_hash": "f34258c0c2ba9f6f27319f612ec6eacaae82ad77149572c5fb22be7ca13ce485",
+      "split_content_hash": "f34258c0c2ba9f6f27319f612ec6eacaae82ad77149572c5fb22be7ca13ce485",
+      "architecture": "CropClassifier-3conv-gap",
+      "image_size": 64,
+      "epochs": 15,
+      "batch_size": 8,
+      "learning_rate": 0.001,
+      "seed": 0,
+      "augmentation": "horizontal_flip_p0.5 + brightness_jitter[0.85,1.15]",
+      "metrics": {
+        "n_positive_examples": 44,
+        "accuracy": 1.0,
+        "precision_per_class": {
+          "watch": 1.0
+        },
+        "recall_per_class": {
+          "watch": 1.0
+        },
+        "f1_per_class": {
+          "watch": 1.0
+        },
+        "confusion_matrix": {
+          "watch": {
+            "watch": 44
+          }
+        },
+        "n_rejection_examples": 6,
+        "false_class_rate": 1.0,
+        "latency_ms_mean": 0.939,
+        "latency_ms_p95": 1.259
+      },
+      "artifact_path": "models\\custom\\crop-clf-2026-09-16T1404-78a4bdb3\\model.onnx",
+      "artifact_sha256": "0fdf58a474ef8931b15fd5f159cb633a3c5fe1f5940bbd723609a4674967ce0a",
+      "wall_seconds": 18.015,
+      "machine_fingerprint": "Windows-10-10.0.26200-SP0 | Intel64 Family 6 Model 170 Stepping 4, GenuineIntel | 18 logical cores | Python 3.11.9",
+      "provider": "cpu (training always runs in PyTorch on CPU; serving is ONNX Runtime, see perception/classifier.py)",
+      "dataset_human_confirmed_fraction": 1.0,
+      "validated": true,
+      "active": true,
+      "notes": "trained from C:\\Users\\mummi\\AppData\\Local\\Temp\\claude\\C--Users-mummi-Documents-Projects-PredictiveSense\\072a49c1-ed7f-4273-b51b-eec7161fdae0\\scratchpad\\empty_objects_root + external: ['data/external/open-images-v7/watch/manifest.json']"
+    }
+  ]
+}

@@ -81,12 +81,68 @@ tool is plain ES modules from `static/label/`.
 Fetched and hash-verified by `python scripts/fetch_models.py` against
 `models/manifest.json`. See the open-decision box above.
 
+## Training dependencies (`train` extra, Phase 11 Part B - not previously recorded here)
+
+| Package | Version | Licence | Why it is needed |
+|---|---|---|---|
+| `torch` | 2.14.0 (CPU wheel) | BSD-3-Clause | Trains the crop classifier (`predictivesense/training/`) - the ONLY place it is imported (`tests/unit/test_no_forbidden_imports.py` enforces this; the serving app never needs it, see `perception/classifier.py`). |
+| `torchvision` | 0.29.0 (CPU wheel) | BSD-3-Clause | Transform utilities used by `predictivesense/training/crop_data.py`. |
+| `onnxscript` | 0.7.2 | Apache-2.0/MIT | Required by `torch.onnx.export`'s dynamo-capable path; training-only. |
+
+## Datasets
+
+| Dataset | Version / subset | Licence situation | Why it is needed |
+|---|---|---|---|
+| Object Learning Studio samples (`data/objects/`) | ongoing, developer-collected | Our own - the originality claim for the paper | The Studio's own captured positives/negatives; never leaves `data/objects/`, never redistributed as raw images with the repo. |
+| Phase 2.5 evaluation set (`data/eval/`) | ongoing, developer-collected | Our own | Held-out test data for detection eval; strictly separate from training data (`tests/unit/test_dataset_separation.py`). |
+| **Open Images V7** (Phase 12 external import) | `open-images-v7-train-5000`, FiftyOne export, downloaded 2026-09-16, `train` split, 5000 images | **Annotations**: CC-BY-4.0 (Google, Open Images V7). **Images**: individually licensed by their original Flickr authors - overwhelmingly CC-BY-2.0 in the classes imported so far (`watch`), but **not uniformly one licence**; each imported sample's per-image `license`/`author`/`source_url` is preserved verbatim in `data/external/open-images-v7/<class>/manifest.json` (section 6.1). **Redistribution constraint: images are NOT copied into this repository at all** (`data/external/` is git-ignored; only manifests, SHA-256 hashes and `results/external_class_mapping.json` are committed) - so no image redistribution question arises for the repository itself, but any paper artefact that embeds one of these images directly must carry that specific image's own licence/attribution from the manifest, not a blanket claim. | Combined with (or, for `watch` specifically, used in place of - see `docs/decisions.md` Phase 12) Studio samples to train the Phase 11 crop classifier on real, human-annotated boxes for classes too laborious to self-collect from scratch. |
+
+**Import-time dependency, never a runtime one (`external` extra):** `pandas` (BSD-3-Clause) is used only by `scripts/audit_external_dataset.py` and `scripts/import_external_dataset.py` to parse the FiftyOne export's CSVs directly from disk. Neither script, nor anything under `predictivesense/`, imports the `fiftyone` package itself - the one-time download was a manual, separate step; see the environment-contamination note in `docs/decisions.md` Phase 12 for why `fiftyone` must never be installed into this project's own `.venv` again.
+
+## Algorithm attribution - Phase 9 tracker (no new dependency)
+
+`predictivesense/tracking/` implements its association and lifecycle logic
+in-repository - **no tracking library or package was added** (stdlib +
+`numpy` only, same rule as `predictivesense/dataset/`/`predictivesense/eval/`
+above). The algorithm *family* is cited here per the Phase 9 prompt's
+requirement to attribute the approach, not copy an implementation:
+
+- **SORT** (Simple Online and Realtime Tracking) - Bewley, A., Ge, Z.,
+  Ott, L., Ramos, F., & Upcroft, B. (2016). *Simple online and realtime
+  tracking.* IEEE International Conference on Image Processing (ICIP).
+  `arxiv.org/abs/1602.00763`. Source of the IoU-based greedy association +
+  constant-velocity motion-prediction pattern this tracker's stage-1
+  association and `TrackState.predicted_bbox` follow (this implementation
+  uses a linear constant-velocity extrapolation of the box centre, not
+  SORT's Kalman filter - a deliberate simplification given the detector's
+  own per-frame localisation noise on this hardware was not measured to
+  justify a full Kalman state).
+- **ByteTrack** - Zhang, Y., Sun, P., Jiang, Y., Yu, D., Weng, F., Yuan, Z.,
+  Luo, P., Liu, W., & Wang, X. (2022). *ByteTrack: Multi-object tracking by
+  associating every detection box.* European Conference on Computer Vision
+  (ECCV). `arxiv.org/abs/2110.06864`. Source of the two-stage association
+  pattern this tracker's `association.py`/`tracker.py` follow: a first pass
+  on high-scoring detections, a second IoU-only pass recovering
+  already-tracked objects from lower-scoring detections that never creates a
+  new track identity.
+
+Both are cited for their algorithmic ideas; no code from either project's
+reference implementation was copied. Every threshold (`n_init`, `max_age`)
+is independently measured on this project's own footage
+(`docs/decisions.md`), not carried over from either paper's tuning.
+
 ## Optional dependencies (`camera` extra)
 
 | Package | Version | Licence | Why it is needed |
 |---|---|---|---|
 | `pygrabber` | 0.2 | MIT | Human-readable DirectShow camera names for backend enumeration (`GET /api/cameras`). Windows-only. Never imported at import time; a missing or throwing `pygrabber` degrades to `"Camera <index>"` and logs once at INFO. |
 | `comtypes` | 1.4.16 | MIT | `pygrabber`'s only dependency (COM interop). Pulled in transitively by the `camera` extra. |
+
+## Optional dependencies (`external` extra, Phase 12)
+
+| Package | Version | Licence | Why it is needed |
+|---|---|---|---|
+| `pandas` | 3.0.5 | BSD-3-Clause | CSV parsing for `scripts/audit_external_dataset.py` / `scripts/import_external_dataset.py` only - never imported under `predictivesense/` (enforced by `tests/unit/test_no_forbidden_imports.py`, which also forbids `fiftyone` anywhere in the package). |
 
 ## Dev dependencies
 
