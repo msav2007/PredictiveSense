@@ -19,8 +19,17 @@ the JSONL depends only on the file, the config and the weights, so two runs are
 byte-identical (asserted by
 ``tests/integration/test_recorded_determinism_with_models.py``). Coordinates and
 scores are written at fixed precision in a fixed key order. Without an engine the
-lists stay empty and the output is exactly the Phase 1 shape. ``tracks`` is
-always empty - there is no tracker.
+lists stay empty and the output is exactly the Phase 1 shape.
+
+Phase 9: when a :class:`~predictivesense.tracking.Tracker` is passed, each line
+also carries real ``tracks`` - the **same** tracker class the live loop runs,
+fed frame-by-frame in file order with the file's own presentation timestamps
+(never wall time), so two runs of the same file/config/model/tracker produce
+byte-identical track ids and states (asserted by
+``tests/integration/test_recorded_determinism_with_models.py``). Recorded mode
+is lossless (every decoded frame reaches the tracker - see section 13.3 of the
+Phase 9 prompt), which is *not* comparable to real-time's lossy, timing-driven
+continuity. Without a tracker, ``tracks`` stays empty.
 """
 
 from __future__ import annotations
@@ -40,9 +49,10 @@ from predictivesense.pipeline.perception_frame import (
 from predictivesense.telemetry.manifest import git_state, utc_now_iso
 
 if TYPE_CHECKING:
-    from predictivesense.core.types import Detection, Pose
+    from predictivesense.core.types import Detection, Pose, Track
     from predictivesense.perception.engine import PerceptionEngine
     from predictivesense.perception.policy import RecognitionPolicy
+    from predictivesense.tracking import Tracker
 
 __all__ = ["RecordedDriver", "RecordedResult"]
 
@@ -87,9 +97,45 @@ def _pose_to_dict(pose: "Pose") -> dict[str, object]:
     }
 
 
+def _track_to_dict(tr: "Track") -> dict[str, object]:
+    x1, y1, x2, y2 = tr.bbox
+    vx, vy = tr.velocity
+    return {
+        "track_id": tr.track_id,
+        "status": tr.status.value,
+        "class_name": tr.class_name,
+        "bbox": [round(x1, _COORD_DP), round(y1, _COORD_DP),
+                 round(x2, _COORD_DP), round(y2, _COORD_DP)],
+        "observed_class": tr.observed_class,
+        "track_class": tr.track_class,
+        "class_votes": [[c, n] for c, n in tr.class_votes],
+        "velocity": [round(vx, _COORD_DP), round(vy, _COORD_DP)],
+        "fresh": tr.fresh,
+        "age_frames": tr.age_frames,
+        "age_ms": round(tr.age_ms, 1),
+        "hits": tr.hits,
+        "consecutive_misses": tr.consecutive_misses,
+        "last_detector_confidence": (
+            round(tr.last_detector_confidence, _SCORE_DP)
+            if tr.last_detector_confidence is not None else None
+        ),
+        "last_detector_confidence_age_ms": round(tr.last_detector_confidence_age_ms, 1),
+        "policy_state": tr.policy_state,
+        "tier": tr.tier,
+        "pose_keypoints": [
+            [round(kx, _COORD_DP), round(ky, _COORD_DP), round(kv, _SCORE_DP)]
+            for (kx, ky, kv) in tr.pose_keypoints
+        ],
+        "pose_frame_id": tr.pose_frame_id,
+        "pose_age_ms": round(tr.pose_age_ms, 1),
+        "pose_fresh": tr.pose_fresh,
+    }
+
+
 class RecordedResult(dict):
     """``{run_id, jsonl_path, manifest_path, frames, replay_mode, source_path,
-    perception_enabled, total_detections, total_poses}``."""
+    perception_enabled, total_detections, total_poses, tracking_enabled,
+    total_tracks}``."""
 
 
 class RecordedDriver:
@@ -107,6 +153,7 @@ class RecordedDriver:
         config_profile: str = "unknown",
         perception: "PerceptionEngine | None" = None,
         policy: "RecognitionPolicy | None" = None,
+        tracker: "Tracker | None" = None,
     ) -> RecordedResult:
         src_path = Path(path)
         run_id = run_id or uuid.uuid4().hex
@@ -131,6 +178,7 @@ class RecordedDriver:
         last_pts: float | None = None
         total_detections = 0
         total_poses = 0
+        total_tracks = 0
         perception_errors = 0
         policy_counts = None
 
@@ -153,6 +201,7 @@ class RecordedDriver:
 
                     dets: list[dict[str, object]] = []
                     poses: list[dict[str, object]] = []
+                    out_dets: list["Detection"] = []
                     if perception is not None:
                         result = perception.infer(frame, frame_index=frame.frame_id)
                         if result.frame_error:
@@ -197,13 +246,29 @@ class RecordedDriver:
                                 pf.model_dump_json() + "\n"
                             )
 
+                    tracks: list[dict[str, object]] = []
+                    if tracker is not None:
+                        # Recorded mode is lossless - every decoded frame reaches
+                        # the tracker, unlike the real-time loop's staleness/
+                        # mailbox-driven drops (section 13.3). capture_ts is the
+                        # file's own PTS, never wall time, so two runs are
+                        # byte-identical (section 13.2).
+                        track_objs = tracker.update(
+                            out_dets, frame_id=frame.frame_id, capture_ts=frame.capture_ts,
+                            frame_width=float(frame.width), frame_height=float(frame.height),
+                            poses=result.poses if perception is not None else (),
+                            pose_fresh=not result.pose_reused if perception is not None else True,
+                        )
+                        tracks = [_track_to_dict(t) for t in track_objs]
+                        total_tracks += len(tracks)
+
                     line = {
                         "frame_id": frame.frame_id,
                         "capture_ts": frame.capture_ts,
                         "pts_s": frame.capture_ts,
                         "detections": dets,
                         "poses": poses,
-                        "tracks": [],
+                        "tracks": tracks,
                     }
                     fh.write(
                         json.dumps(
@@ -262,18 +327,25 @@ class RecordedDriver:
                 if policy is not None
                 else {"enabled": False}
             ),
+            "tracking": (
+                {"enabled": True, "total_tracks": total_tracks, "stats": vars(tracker.stats)}
+                if tracker is not None
+                else {"enabled": False}
+            ),
             "jsonl_path": str(jsonl_path),
             "jsonl_bytes": jsonl_path.stat().st_size,
         }
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         _LOG.info(
-            "recorded run %s: %d frames from %s (%s), %d detections / %d poses -> %s",
+            "recorded run %s: %d frames from %s (%s), %d detections / %d poses / "
+            "%d tracks -> %s",
             run_id,
             frames,
             src_path.name,
             replay_mode,
             total_detections,
             total_poses,
+            total_tracks,
             jsonl_path,
         )
 
@@ -287,4 +359,6 @@ class RecordedDriver:
             perception_enabled=perception is not None,
             total_detections=total_detections,
             total_poses=total_poses,
+            tracking_enabled=tracker is not None,
+            total_tracks=total_tracks,
         )
