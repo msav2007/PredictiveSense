@@ -12,11 +12,17 @@ import { GROUP_ORDER } from "/static/groups/constants.js";
 import { initMetrics } from "/static/features/metrics.js";
 import { isPolicyView, setPolicyView, ruleLabel, thresholdFor } from "/static/features/policy.js";
 
-// Detection selected on the overlay (click) - full detail shown below.
+// Track / detection selected on the overlay (click) - full detail shown below.
+// A normal overlay click selects a track (section 9.5); a suppressed-reveal
+// click (Diagnostics-only toggle) selects a raw, untracked detection instead.
 let selectedDetection = null;
+let selectedTrackId = null;
 on("detection-selected", (ev) => {
   selectedDetection = (ev.detail && ev.detail.detection) || null;
+  const track = ev.detail && ev.detail.track;
+  selectedTrackId = track ? track.track_id : null;
   renderSelectedDetail(runtime.lastSnapshot);
+  renderSelectedTrackDetail(runtime.lastSnapshot);
 });
 
 export const id = "diagnostics";
@@ -66,6 +72,10 @@ const PHASE8_METRICS = [
   ["frames_in_flight", "Frames in flight"],
   ["pose_reused", "Pose reused (stale) this frame"],
   ["pose_age_ms", "Reused pose age (ms)"],
+  // Phase 11 section 4: age of what is actually displayed right now, not of
+  // this frame's own detection (see stage_capture_to_snapshot_ms above).
+  ["displayed_pose_age_ms", "Displayed pose age (ms)"],
+  ["displayed_track_age_ms", "Displayed track age (ms)"],
 ];
 
 export function render(body) {
@@ -93,6 +103,9 @@ export function render(body) {
       // model version, and the scheduling / staleness / pose-cadence policy.
       el("div", {}, [el("dt", {}, ["active EP"]), el("dd", { id: "rt-active-ep", text: "…" })]),
       el("div", {}, [el("dt", {}, ["model version"]), el("dd", { id: "rt-model-version", text: "…" })]),
+      // Phase 11 Part B section 13.3: "none" = baseline, no validated custom
+      // classifier active - never a placeholder name.
+      el("div", {}, [el("dt", {}, ["custom classifier"]), el("dd", { id: "rt-custom-classifier", text: "…" })]),
       el("div", {}, [el("dt", {}, ["scheduler"]), el("dd", { id: "rt-scheduler", text: "…" })]),
       el("div", {}, [el("dt", {}, ["max frame age (ms)"]), el("dd", { id: "rt-max-age", text: "…" })]),
       el("div", {}, [el("dt", {}, ["pose cadence"]), el("dd", { id: "rt-pose-cadence", text: "…" })]),
@@ -161,6 +174,17 @@ export function render(body) {
   body.append(el("ul", { class: "line-list", id: "policy-raw-decided" }, [
     el("li", { text: "—" }),
   ]));
+
+  // Phase 9 section 9.5: per-track detail - identity, lifecycle, class-vote
+  // resolution, carried-forward confidence and its age, independent of
+  // whatever presentation hysteresis the overlay applies to the label.
+  body.append(el("p", { class: "subhead", text: "Tracking (Phase 9)" }));
+  body.append(el("p", { class: "note", text: "Selected track (click a box on the overlay):" }));
+  body.append(el("div", { id: "trk-selected", class: "kv-list" }, [
+    el("div", {}, [el("dt", { text: "—" }), el("dd", { text: "none selected" })]),
+  ]));
+  body.append(el("p", { class: "note", text: "Live tracks — this frame:" }));
+  body.append(el("div", { id: "trk-table", class: "rd-table" }, [el("p", { class: "note", text: "—" })]));
 
   const cap = (runtime.config && runtime.config.capture) || {};
   body.append(
@@ -240,6 +264,7 @@ async function fetchRuntime() {
     const resolved = d.provider_resolved ? ` (config ${d.requested_provider} → ${d.provider_resolved})` : "";
     set("rt-active-ep", ep + resolved);
     set("rt-model-version", d.model_version);
+    set("rt-custom-classifier", d.custom_classifier_version || "none");
     set("rt-scheduler", d.scheduler);
     set("rt-max-age", d.max_frame_age_ms);
     set("rt-pose-cadence", d.pose_cadence_resolved || d.pose_cadence);
@@ -309,6 +334,8 @@ export function update(state) {
 
   renderSelectedDetail(state && state.snapshot);
   renderRecognitionLastFrame(state && state.snapshot);
+  renderSelectedTrackDetail(state && state.snapshot);
+  renderTracksLastFrame(state && state.snapshot);
 }
 
 function iou(a, b) {
@@ -394,6 +421,73 @@ function renderRecognitionLastFrame(snapshot) {
         el("span", { text: d.runner_up ? `${d.runner_up[0]} ${(d.runner_up[1] * 100).toFixed(0)}%` : "—" }),
         el("span", { text: ruleLabel(d.policy_state) }),
         el("span", { text: String(thresholdFor(d)) }),
+      ]),
+    );
+  }
+  host.replaceChildren(...rows);
+}
+
+function trackRows(t) {
+  const votes = (t.class_votes || []).map(([c, n]) => `${c}:${n}`).join(", ") || "—";
+  const conf = t.last_detector_confidence;
+  return [
+    kv("track_id", String(t.track_id)),
+    kv("state", t.status),
+    kv("fresh this frame", t.fresh ? "yes" : "no (coasting - predicted position)"),
+    kv("observed class (last fresh obs.)", t.observed_class || "—"),
+    kv("track class (vote)", t.track_class || "—"),
+    kv("class votes", votes),
+    kv("last detector confidence", conf == null ? "none" : `${(conf * 100).toFixed(1)}%`),
+    kv("confidence age (ms)", conf == null ? "—" : fmtNum(t.last_detector_confidence_age_ms)),
+    kv("policy_state (last fresh obs.)", t.policy_state || "—"),
+    kv("tier", t.tier || "—"),
+    kv("hits", String(t.hits)),
+    kv("consecutive misses", String(t.consecutive_misses)),
+    kv("age (frames / ms)", `${t.age_frames} / ${fmtNum(t.age_ms)}`),
+    kv("velocity (px/s)", `${fmtNum(t.velocity && t.velocity[0])}, ${fmtNum(t.velocity && t.velocity[1])}`),
+  ];
+}
+
+function renderSelectedTrackDetail(snapshot) {
+  const host = document.getElementById("trk-selected");
+  if (!host) return;
+  const tracks = (snapshot && snapshot.tracks) || [];
+  const t = selectedTrackId == null ? null : tracks.find((x) => x.track_id === selectedTrackId);
+  if (!t) {
+    host.replaceChildren(el("div", {}, [el("dt", { text: "—" }), el("dd", { text: "none selected" })]));
+    return;
+  }
+  host.replaceChildren(...trackRows(t));
+}
+
+function renderTracksLastFrame(snapshot) {
+  const host = document.getElementById("trk-table");
+  if (!host) return;
+  const tracks = (snapshot && snapshot.tracks) || [];
+  if (!tracks.length) {
+    host.replaceChildren(el("p", { class: "note", text: "no live tracks this frame" }));
+    return;
+  }
+  const rows = [
+    el("div", { class: "rd-row rd-head" }, [
+      el("span", { text: "id" }),
+      el("span", { text: "state" }),
+      el("span", { text: "fresh" }),
+      el("span", { text: "class (vote)" }),
+      el("span", { text: "conf" }),
+      el("span", { text: "misses" }),
+    ]),
+  ];
+  for (const t of tracks.slice(0, 20)) {
+    const conf = t.last_detector_confidence;
+    rows.push(
+      el("div", { class: "rd-row" }, [
+        el("span", { text: String(t.track_id) }),
+        el("span", { text: t.status }),
+        el("span", { text: t.fresh ? "yes" : "no" }),
+        el("span", { text: t.track_class || t.observed_class || "—" }),
+        el("span", { text: conf == null ? "—" : `${(conf * 100).toFixed(0)}%` }),
+        el("span", { text: String(t.consecutive_misses) }),
       ]),
     );
   }

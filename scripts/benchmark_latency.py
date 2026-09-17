@@ -165,7 +165,8 @@ def _end_to_end(cfg, imgs, *, seconds: float):
     stage_names = (
         "worker_encode", "ws_transit", "decode", "src_buffer_dwell",
         "producer_handoff", "mailbox_dwell", "detector", "pose", "policy",
-        "snapshot_build", "ws_out", "capture_to_snapshot", "frame_age_at_dequeue",
+        "tracker", "snapshot_build", "ws_out", "capture_to_snapshot",
+        "frame_age_at_dequeue",
     )
     stage_samples: dict[str, list[float]] = {n: [] for n in stage_names}
     dropped_stale_last = [0.0]
@@ -288,6 +289,8 @@ def main(argv=None) -> int:
     p.add_argument("--pose-cadence", default=None,
                    help="override perception.pose_cadence, e.g. every_frame, "
                         "every_n:2, interval_ms:200 (Phase 8)")
+    p.add_argument("--no-tracking", action="store_true",
+                   help="disable the Phase 9 tracker for this run (before/after isolation)")
     args = p.parse_args(argv)
     configure_logging("INFO")
 
@@ -307,6 +310,10 @@ def main(argv=None) -> int:
             "analysis": cfg.analysis.model_copy(
                 update={"max_frame_age_ms": args.max_frame_age_ms}
             )
+        })
+    if args.no_tracking:
+        cfg = cfg.model_copy(update={
+            "tracking": cfg.tracking.model_copy(update={"enabled": False})
         })
     src = Path(args.source)
     if not src.exists():
@@ -347,6 +354,8 @@ def main(argv=None) -> int:
                 sub_argv += ["--pose-cadence", args.pose_cadence]
             if args.max_frame_age_ms is not None:
                 sub_argv += ["--max-frame-age-ms", str(args.max_frame_age_ms)]
+            if args.no_tracking:
+                sub_argv += ["--no-tracking"]
             cp = subprocess.run(
                 sub_argv,
                 capture_output=True, text=True, timeout=args.end_to_end_seconds + 180,
@@ -440,6 +449,7 @@ _ATTR_STAGES: tuple[tuple[str, str], ...] = (
     ("detector", "detector inference"),
     ("pose", "pose inference"),
     ("policy", "recognition policy"),
+    ("tracker", "tracker update (Phase 9)"),
     ("snapshot_build", "snapshot assembly"),
     ("ws_out", "emit -> /ws/state send"),
     ("overlay_paint", "capture -> overlay paint (browser)"),

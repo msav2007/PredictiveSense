@@ -76,6 +76,7 @@ class FrameTrace:
         "pose_ms",
         "pose_reused",
         "policy_ms",
+        "tracker_ms",
         "snapshot_ts",
         "frame_age_at_dequeue_ms",
     )
@@ -96,6 +97,9 @@ class FrameTrace:
         self.pose_ms: float | None = None
         self.pose_reused: bool = False
         self.policy_ms: float | None = None
+        # Phase 9: Tracker.update() duration for this frame; None when tracking
+        # is disabled or the frame never reached the tracker (e.g. stale).
+        self.tracker_ms: float | None = None
         self.snapshot_ts: float | None = None
         self.frame_age_at_dequeue_ms: float | None = None
 
@@ -163,10 +167,32 @@ class Detection(_Frozen):
     policy_state: str = "accepted"
     runner_up: tuple[str, float] | None = None
     tier: str = "primary"
+    # Phase 11 Part B (section 16): a SEPARATE, additive channel from an
+    # active custom crop classifier - never touches class_name/policy_state/
+    # tier, so the recognition policy's own decisions are byte-for-byte
+    # unchanged whether or not a custom classifier is active (an explicit
+    # non-goal boundary). `None` unless a validated, active classifier
+    # actually ran real inference on this box's crop - never a placeholder,
+    # never a hard-coded name.
+    custom_class_name: str | None = None
+    custom_class_confidence: float | None = None
 
 
 class Pose(_Frozen):
-    """A single body pose. Defined for later phases; unused in Phase 0."""
+    """A single body pose. Defined for later phases; unused in Phase 0.
+
+    ``capture_ts`` (Phase 11 section 4/5) is the TRUE instant this pose was
+    measured - stamped once, at inference, and never touched again. When the
+    perception engine reuses the same frozen ``Pose`` object across several
+    cadence-due cycles (``pose_max_reuse_ms``), this field is what lets a
+    track's own pose binding (``Tracker._bind_poses``) tell "reused" from
+    "just measured": it stores this pose's own ``capture_ts``, not the current
+    frame's, so age grows honestly across reuse instead of resetting on every
+    rebind (see ``docs/decisions.md`` Phase 11, and
+    ``results/track_pose_freshness_before.md`` for the measured before-state
+    this fixes). ``None`` only for a ``Pose`` built without it (back-compat /
+    test fixtures); callers fall back to the current frame's own capture_ts.
+    """
 
     keypoints: tuple[tuple[float, float, float], ...] = Field(
         description="Tuples of (x, y, visibility)."
@@ -174,16 +200,81 @@ class Pose(_Frozen):
     bbox: BBox
     score: float
     frame_id: int
+    capture_ts: float | None = None
 
 
 class Track(_Frozen):
-    """A tracked entity. Minimal on purpose; P3 extends it."""
+    """A tracked entity.
+
+    Phase 9 (``predictivesense/tracking/``) adds every field below
+    **additively** (Phase 0 rule; recorded in ``docs/decisions.md``) on top of
+    the Phase 0 minimal shape (``track_id``, ``status``, ``class_name``,
+    ``bbox``, ``last_seen_frame_id``) so nothing that already reads a `Track`
+    needs reshaping.
+
+    * ``observed_class`` - what the detector said on the most recent *fresh*
+      observation (unchanged while coasting).
+    * ``track_class`` - the track's bounded-history majority vote; may differ
+      from ``observed_class`` when the raw class flips frame to frame.
+    * ``class_votes`` - ``(class_name, count)`` pairs backing ``track_class``,
+      most-voted first, for Diagnostics.
+    * ``velocity`` - constant-velocity motion estimate, pixels/second, of the
+      bbox centre.
+    * ``fresh`` - a detector observation landed on this exact frame (True) vs
+      the bbox is a motion prediction because it is ``coasting`` (False).
+    * ``last_detector_confidence`` / ``last_detector_confidence_age_ms`` - the
+      score of the observation that produced it and that observation's age;
+      **never** recomputed, decayed or invented while coasting (Phase 9
+      section 8). ``None`` confidence means no observation has ever fired.
+    * ``policy_state`` / ``tier`` - of that same last fresh observation.
+
+    Phase 10 (section 5) adds the pose-to-track binding **additively**: a
+    person track carries its own most-recently-bound pose rather than pose
+    being drawn straight off the per-frame ``StateSnapshot.poses`` list (which
+    measurement - ``results/pose_continuity_raw.md`` - showed vanishes on
+    36.4% of non-stale live snapshots because the *engine's* own cadence/reuse
+    bookkeeping has no memory beyond one reuse window). ``pose_keypoints`` is
+    ``()`` for a track with no bound pose (every non-person track, or a person
+    track whose pose has aged past ``tracking.pose_max_age_ms``).
+    ``pose_age_ms`` is continuous (never a binary stale flag) so the overlay
+    can dim proportionally as it ages, mirroring
+    ``last_detector_confidence_age_ms``. ``pose_fresh`` is true only on the
+    exact cycle a NEW (non-engine-reused) pose observation was bound.
+    """
 
     track_id: int
     status: TrackStatus
     class_name: str
     bbox: BBox
     last_seen_frame_id: int
+    observed_class: str = ""
+    track_class: str = ""
+    class_votes: tuple[tuple[str, int], ...] = ()
+    velocity: tuple[float, float] = (0.0, 0.0)
+    fresh: bool = True
+    age_frames: int = 0
+    age_ms: float = 0.0
+    hits: int = 0
+    consecutive_misses: int = 0
+    first_seen_frame_id: int = 0
+    last_detection_frame_id: int = 0
+    last_detection_capture_ts: float = 0.0
+    last_detector_confidence: float | None = None
+    last_detector_confidence_age_ms: float = 0.0
+    policy_state: str = ""
+    tier: str = ""
+    pose_keypoints: tuple[tuple[float, float, float], ...] = ()
+    pose_frame_id: int | None = None
+    pose_capture_ts: float | None = None
+    pose_age_ms: float = 0.0
+    pose_fresh: bool = False
+    # Phase 11 Part B section 16: the last real custom-classifier inference on
+    # this track's own detection, carried forward exactly like
+    # last_detector_confidence (same age - custom_class_name is set in the
+    # same record_hit() call as last_detector_confidence). None when no
+    # custom classifier is active, or this track has never had one accepted.
+    custom_class_name: str | None = None
+    custom_class_confidence: float | None = None
 
 
 class Relation(_Frozen):

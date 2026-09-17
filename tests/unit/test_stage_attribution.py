@@ -34,6 +34,7 @@ def _full_trace() -> FrameTrace:
     t.pose_ms = 55.0
     t.pose_reused = False
     t.policy_ms = 0.1
+    t.tracker_ms = 0.2
     t.snapshot_ts = 100.306      # dequeue + 125.1 ms model + ~0.9 ms build
     t.frame_age_at_dequeue_ms = 180.0
     return t
@@ -56,6 +57,7 @@ def test_record_stages_folds_every_server_stage_into_the_registry() -> None:
     assert stages.mailbox_dwell_ms == pytest.approx(164.5, abs=0.5)
     assert stages.detector_ms == pytest.approx(70.0)
     assert stages.pose_ms == pytest.approx(55.0)
+    assert stages.tracker_ms == pytest.approx(0.2)
     assert stages.snapshot_build_ms is not None and stages.snapshot_build_ms >= 0.0
     assert stages.snapshot_build_ms == pytest.approx(0.9, abs=0.3)
     assert stages.capture_to_snapshot_ms == pytest.approx(306.0, abs=1.0)

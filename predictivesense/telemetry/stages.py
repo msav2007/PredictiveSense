@@ -22,6 +22,8 @@ Stages, in order, and the two endpoints whose difference defines each:
     detector          server: detector inference duration
     pose              server: pose inference duration (0.0 when reused)
     policy            server: recognition-policy duration
+    tracker           server: Tracker.update() duration (Phase 9; None when
+                      tracking is disabled or the frame never reached it)
     snapshot_build    (mbox_dequeue_ts + model time) -> snapshot_ts
 
 ``ws_out`` (emit -> WebSocket send) is recorded by the broadcaster into the same
@@ -56,6 +58,7 @@ SERVER_STAGE_NAMES: tuple[str, ...] = (
     "detector",
     "pose",
     "policy",
+    "tracker",
     "snapshot_build",
 )
 # Full end-to-end chain, including the two stages attributed elsewhere.
@@ -87,6 +90,7 @@ class FrameStages:
     pose_ms: float | None
     pose_reused: bool
     policy_ms: float | None
+    tracker_ms: float | None
     snapshot_build_ms: float | None
     frame_age_at_dequeue_ms: float | None
 
@@ -104,6 +108,7 @@ class FrameStages:
             "pose_ms": self.pose_ms,
             "pose_reused": self.pose_reused,
             "policy_ms": self.policy_ms,
+            "tracker_ms": self.tracker_ms,
             "snapshot_build_ms": self.snapshot_build_ms,
             "frame_age_at_dequeue_ms": self.frame_age_at_dequeue_ms,
         }
@@ -123,6 +128,7 @@ class FrameStages:
             "detector": self.detector_ms,
             "pose": self.pose_ms,
             "policy": self.policy_ms,
+            "tracker": self.tracker_ms,
             "snapshot_build": self.snapshot_build_ms,
         }
         return [name for name, value in got.items() if value is None]
@@ -151,8 +157,11 @@ def record_stages(
     detector = trace.detector_ms
     pose = 0.0 if trace.pose_reused else trace.pose_ms
     policy = trace.policy_ms
+    tracker = trace.tracker_ms
 
-    model_ms = sum(v for v in (detector, trace.pose_ms, policy) if v is not None)
+    model_ms = sum(
+        v for v in (detector, trace.pose_ms, policy, tracker) if v is not None
+    )
     snapshot_build: float | None = None
     if trace.mbox_dequeue_ts is not None and trace.snapshot_ts is not None:
         span_ms = (trace.snapshot_ts - trace.mbox_dequeue_ts) * 1000.0
@@ -170,6 +179,7 @@ def record_stages(
         "detector": detector,
         "pose": pose,
         "policy": policy,
+        "tracker": tracker,
         "snapshot_build": snapshot_build,
     }
     for name, value in pairs.items():
@@ -195,6 +205,7 @@ def record_stages(
         pose_ms=pose,
         pose_reused=trace.pose_reused,
         policy_ms=policy,
+        tracker_ms=tracker,
         snapshot_build_ms=snapshot_build,
         frame_age_at_dequeue_ms=trace.frame_age_at_dequeue_ms,
     )

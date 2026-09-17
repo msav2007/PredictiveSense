@@ -19,6 +19,7 @@ from predictivesense.logging_setup import configure_logging, get_logger
 from predictivesense.perception.engine import build_perception
 from predictivesense.perception.policy import RecognitionPolicy
 from predictivesense.pipeline.recorded import RecordedDriver
+from predictivesense.tracking import Tracker
 
 _LOG = get_logger("predictivesense.scripts.run_recorded")
 
@@ -37,6 +38,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--no-policy",
         action="store_true",
         help="skip the recognition policy layer (raw detector output)",
+    )
+    parser.add_argument(
+        "--no-tracking",
+        action="store_true",
+        help="skip the tracker even if the profile enables it",
     )
     return parser.parse_args(argv)
 
@@ -72,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     policy = None if args.no_policy else RecognitionPolicy(config.policy)
+    tracker = (
+        None if args.no_tracking or not config.tracking.enabled
+        else Tracker(config.tracking)
+    )
 
     driver = RecordedDriver(results_dir=config.results_dir)
     try:
@@ -81,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
             config_profile=config.profile,
             perception=perception,
             policy=policy,
+            tracker=tracker,
         )
     except (RuntimeError, OSError) as exc:
         _LOG.error("recorded run failed: %r", exc)
@@ -93,8 +104,10 @@ def main(argv: list[str] | None = None) -> int:
     _LOG.info("frames      : %d", result["frames"])
     _LOG.info("perception  : %s", "on" if perception is not None else "off")
     _LOG.info("policy      : %s", "on" if policy is not None else "off")
+    _LOG.info("tracking    : %s", "on" if tracker is not None else "off")
     _LOG.info("detections  : %d", result.get("total_detections", 0))
     _LOG.info("poses       : %d", result.get("total_poses", 0))
+    _LOG.info("tracks      : %d", result.get("total_tracks", 0))
     _LOG.info("jsonl       : %s", result["jsonl_path"])
     _LOG.info("manifest    : %s", result["manifest_path"])
     return 0

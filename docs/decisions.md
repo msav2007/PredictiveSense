@@ -774,3 +774,205 @@ this build).
   fresh clone on either machine. CUDA / DirectML could not be *executed* in this
   environment (`onnxruntime` build exposes CPU + Azure only); the `cuda`-marked
   tests skip cleanly and are ready for the developer's NVIDIA machine.
+
+## Phase 9 - multi-object tracking & honest detection state semantics (2026-09-14)
+
+Full trace, measurements and physical-verification status:
+`docs/phase-reports/phase9.md`.
+
+### Root-cause investigation before any rendering change
+
+- **2026-09-14** Root cause of every "grey" symptom is traced by reading the
+  actual code end to end (`perception/policy.py` -> `core/types.py` ->
+  `pipeline/loop.py` -> `api/broadcast.py` -> `static/features/metrics.js` ->
+  `static/ui/store.js` -> `static/features/overlay.js`) and published,
+  file:line-cited, **before** touching any rendering code, per the Phase 9
+  prompt's explicit gate. All four hypothesised causes confirmed, plus a fifth
+  (the `low_confidence_band` and the policy's `per_class_threshold_rule` are
+  two independently configured cutoffs that can drift apart) and a sixth
+  (zero hysteresis anywhere - raw per-frame values reach the canvas on every
+  WS message). See `docs/architecture.md`'s Phase 9 section for the summary
+  and `docs/phase-reports/phase9.md` for the full citations.
+- **2026-09-14** The frequency table (how often each grey-producing condition
+  actually fires) is measured two ways, not invented: a **batch** pass
+  (`scripts/grey_state_audit.py`) runs the real detector + policy over every
+  decoded frame of the developer's own clip (`data/raw`) for `policy_state`/
+  `tier`/band-membership frequency (content-driven, wants a large sample); a
+  **live** pass runs the real FastAPI app's real-time loop (real `/ws/ingest`
+  -> `/ws/state`, real Phase 8 timing) over the same clip for staleness
+  frequency (a timing-driven property a batch pass cannot produce - there are
+  no ingest gaps in a decoded-frame loop). Results:
+  `results/grey_state_frequency.{json,md}`. On the one available clip,
+  `accepted_secondary` dominates (38.4% of detections) and `unknown_*`/
+  `suppressed`/`rejected` never fired at all - a single-clip result, re-derive
+  once more footage exists.
+
+### Tracker algorithm choice
+
+- **2026-09-14** IoU + constant-velocity motion prediction with a two-stage
+  (ByteTrack-style) greedy association pass, implemented in-repository rather
+  than adding a tracking dependency (`predictivesense/tracking/`, stdlib +
+  numpy only - no `scipy`/`lap`/`motpy`/etc). Cited (algorithm family, not
+  copied implementation) in `docs/attribution.md`. Chosen over a Kalman-filter
+  or appearance-based (Re-ID) tracker: the detector runs at ~10-14 Hz on this
+  hardware (Phase 8), objects move at ordinary indoor speeds relative to that
+  cadence, and an appearance embedding would need its own model and inference
+  cost for a benefit not measured to be needed here - out of scope per the
+  Phase 9 prompt's non-goals (no appearance-based re-identification).
+- **2026-09-14** Greedy assignment, not an exact Hungarian solve
+  (`scipy.optimize.linear_sum_assignment` or the `lap` package): avoids a new
+  dependency, stays `O(n*m log(n*m))`, and is fully deterministic given a
+  stable sort tie-break (`association.greedy_match`). For the track counts
+  this project runs (a handful of objects per frame, `max_tracks` bounded at
+  64), the two rarely disagree in practice and greedy is simpler to audit and
+  unit-test.
+- **2026-09-14** Class agreement is a signal, never a gate, in the association
+  cost (`assoc_class_weight`, the smallest of the five weights) - the detector
+  demonstrably flips class on the same physical object (`cup`/`phone`,
+  `bottle`/`cylinder`); a tracker that required class equality to associate
+  would shatter exactly the objects this project cares about. A pair is
+  eligible only on geometric plausibility (`iou > 0` or centres within half a
+  box diagonal); class agreement can never manufacture a match on its own.
+- **2026-09-14** Stage 2 (low-score detections) is IoU-only, no class or
+  motion signal, and **never spawns a new track** - only recovers an
+  already-associated identity. A low-confidence single detection creating a
+  brand-new id would bypass `n_init` entirely, exactly the noise-promotion
+  `n_init` exists to prevent.
+- **2026-09-14** A miss during `tentative` deletes the track immediately
+  rather than letting it coast - a hit streak interrupted by a miss must not
+  later resume and reach `n_init` as if uninterrupted (section 6.5 of the
+  Phase 9 prompt: "an incorrectly reused id is worse than a new one").
+  Confirmed tracks get the normal coasting budget; only tentative ones are
+  held to this stricter standard, since they are not yet an established
+  identity.
+- **2026-09-14** A track whose predicted centre leaves the frame is flagged
+  and given a much smaller miss budget (`border_exit_max_age_frames`, default
+  1) than an ordinary mid-frame disappearance (`max_age_frames`), and is
+  never added to the re-association "ghost" pool - it is expected to be gone,
+  not occluded. This is a judgement default (not derived from measurement,
+  unlike `n_init`/`max_age`), documented here for that reason.
+
+### Thresholds derived from measurement, not invented (section 7.2)
+
+- **2026-09-14** `n_init` and `max_age` are derived, not chosen by feel:
+  `scripts/track_threshold_derivation.py` runs a **live real-time** session
+  (real `/ws/ingest` -> `/ws/state`, real analysis-loop timing - not a batch/
+  recorded pass, which is lossless and analyses every frame at the wrong
+  cadence for this purpose) over `data/raw`, and measures, at the actual
+  non-stale analysis-cycle interval: the presence-run-length distribution
+  (singleton-run share decides `n_init`) and the interior miss-run-length
+  distribution (its p95 decides `max_age_frames`). Result file:
+  `results/track_thresholds.md`. Measured this session: interval p50/p95 =
+  47.0/159.8 ms; singleton-presence share = 0.323 (> 0.20 threshold) ->
+  **`n_init = 3`**; miss-run p95 = 11 cycles, `max(2, p95+1)` ->
+  **`max_age_frames = 12`**, **`max_age_ms = 564.0`** (`max_age_frames *
+  interval_ms_p50`). One clip, one session - re-derive once more footage
+  exists (`docs/phase-reports/phase9.md`, Not verified / limitations).
+- **2026-09-14** `class_vote_history` (default 20) is not independently
+  measured but is grounded in the same session's measured interval
+  (~1000 ms / 47 ms ≈ 21, rounded to 20) - enough history to resolve a
+  majority vote without unbounded growth, documented as a judgement default
+  rather than claimed as a second measured threshold.
+- **2026-09-14** `max_tracks` (64), `reassoc_window_frames` (12, same order as
+  `max_age_frames`) and the five association weights are bounded-resource /
+  judgement defaults, not measurements - each individually commented in
+  `TrackingConfig` (`config/settings.py`) with its rationale, cheap to revise.
+
+### Contract and config changes (additive only)
+
+- **2026-09-14** `core/types.Track` gains 16 fields additively (`observed_class`,
+  `track_class`, `class_votes`, `velocity`, `fresh`, `age_frames`, `age_ms`,
+  `hits`, `consecutive_misses`, `first_seen_frame_id`, `last_detection_frame_id`,
+  `last_detection_capture_ts`, `last_detector_confidence`,
+  `last_detector_confidence_age_ms`, `policy_state`, `tier`) on top of the
+  Phase 0 minimal shape (`track_id`, `status`, `class_name`, `bbox`,
+  `last_seen_frame_id`) - no rename, no reshape.
+- **2026-09-14** `core/types.FrameTrace` gains `tracker_ms` (additive,
+  `__slots__` updated); `telemetry/stages.py` threads `tracker` through
+  `SERVER_STAGE_NAMES`, `FrameStages` and `record_stages` between `policy` and
+  `snapshot_build`, exactly like every other stage - not a parallel metrics
+  path. `scripts/benchmark_latency.py`'s own stage-name tuples updated to
+  match, plus a `--no-tracking` flag for isolated before/after measurement.
+- **2026-09-14** New `config.settings.TrackingConfig` section
+  (`config.tracking`), mirroring `PolicyConfig`'s placement and style;
+  `enabled: bool = True` by default. `enabled: False` reproduces Phase 8
+  exactly (`StateSnapshot.tracks` stays empty) - no code path removed, only
+  gated.
+- **2026-09-14** `TRACK_ELIGIBLE_STATES` (`predictivesense/tracking/tracker.py`)
+  excludes `rejected_size` and `suppressed_implausible` from ever becoming a
+  track - the policy's own judgement that these are not candidate objects, and
+  tracking them would waste bounded track slots on noise the policy already
+  flagged. Consequence: the Diagnostics-only "reveal suppressed" toggle draws
+  those boxes separately, straight from `snap.detections`, with no identity or
+  freshness concept (there is none for something never tracked) -
+  `overlay.js`'s `drawSuppressedDetection`.
+
+### Wiring
+
+- **2026-09-14** One `Tracker` instance per analysis run, held by
+  `AnalysisLoop` (real-time) or passed into `RecordedDriver.run()` (Mode B) -
+  never forked, never rebuilt per frame. The tracker reads no clock itself;
+  `capture_ts` is passed in from `Frame.capture_ts`, so recorded mode's
+  file-PTS timestamps keep the whole run deterministic (asserted by
+  `tests/integration/test_recorded_determinism_with_models.py`).
+- **2026-09-14** The tracker only ever updates on a frame that actually
+  arrived this cycle (never a stale/guard-dropped one - section 10.2). On a
+  stale cycle the last real track list is reported **unchanged** rather than
+  wiped to `[]` - a deliberate behaviour change from Phase 8 (where
+  `stale=True` implied empty `detections`): staleness is a property of the
+  frame, not of any one object, so the overlay now dims the last known tracks
+  through a brief gap instead of making every box vanish. This directly
+  addresses root-cause finding 4.
+- **2026-09-14** `predictivesense/pipeline/recorded.py`'s reserved but
+  always-`[]` `tracks` JSONL field is now populated
+  (`_track_to_dict`, mirroring `_detection_to_dict`'s fixed-precision,
+  fixed-key-order style) when a `tracker=` is passed to `RecordedDriver.run()`.
+  `scripts/run_recorded.py` gains a `--no-tracking` flag for parity with
+  `--no-policy`/`--no-perception`.
+
+### State/visual mapping (rendering change - last, after everything above)
+
+- **2026-09-14** `overlay.js` now draws `snap.tracks`, not `snap.detections`
+  directly - every track-eligible detection this frame is already represented
+  by some track (continuing or newly spawned this cycle), so nothing is lost,
+  and identity becomes the organising concept instead of a raw per-frame box
+  list.
+- **2026-09-14** Five independent visual channels replace the previous
+  overlapping ones (`docs/architecture.md` has the table): identity = hue
+  keyed by `track_id` (not class - two simultaneously Unknown objects now read
+  as visibly different identities); freshness = stroke solid/dashed (and
+  *only* that - no longer doubles as a confidence-band or uncertainty signal);
+  uncertainty = label text `"Unknown"` only, never a colour; tier = a small
+  badge, never a colour change; staleness = whole-overlay dim, unchanged from
+  Phase 8. The `low_confidence_band`'s former dashed/dimmed treatment of
+  `accepted` detections is **retired** as a distinct signal (root-cause
+  finding 2 - it was a second, uncoordinated "looks uncertain" channel); the
+  actual confidence value stays visible via the label percentage and the
+  confidence bar, so no information is lost, only the redundant/confusable
+  channel.
+- **2026-09-14** Confidence percentage now renders for `accepted` **and**
+  `accepted_secondary` (previously secondary showed no percentage at all -
+  root-cause finding 3, generalised beyond just the Unknown case it was
+  designed for). A coasting track's label appends its confidence's age
+  (`"72% (0.3s old)"`) so the viewer can always tell whether the number is
+  this frame's or carried forward (section 8.3). `"Unknown"` deliberately
+  keeps no percentage - a pre-existing, intentional design choice (BLOCK
+  3.10), not something this phase changes.
+- **2026-09-14** Flicker suppression is a small per-track hysteresis map in
+  `overlay.js` (`stableKind`/`KIND_DWELL_MS = 150ms`, ~3 analysis cycles at
+  the measured interval) - a track's displayed *kind* only changes once the
+  new kind has persisted past the dwell window. Presentation-only: Diagnostics
+  reads the raw, unsmoothed per-frame `policy_state` from `snap.detections`
+  throughout, untouched. Most class-label flicker is already resolved
+  upstream by the tracker's own majority-vote `track_class`; this JS-side
+  hysteresis specifically covers `policy_state`-driven kind transitions
+  (accepted/secondary/unknown), which are per-fresh-observation and not
+  otherwise smoothed.
+- **2026-09-14** Click-to-select now selects a **track** (`selectedTrackId`,
+  matched by stable `track_id`, no bbox IoU re-matching needed across frames)
+  instead of a detection bbox; a revealed suppressed detection (never tracked)
+  is still selectable by the old bbox-based path for that one diagnostic case.
+  `groups/diagnostics.js` gains a per-track detail panel (section 9.5) built
+  alongside, not replacing, the existing per-detection "Recognition detail"
+  panel.
+
