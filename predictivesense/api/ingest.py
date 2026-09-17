@@ -22,6 +22,7 @@ import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from predictivesense.api.studio import studio_is_active
 from predictivesense.camera.browser import BrowserSource
 from predictivesense.camera.framing import (
     ClockOffset,
@@ -52,8 +53,11 @@ async def ws_ingest(websocket: WebSocket) -> None:
 
     # Phase 4: no analysis frames may reach the pipeline while the Object
     # Learning Studio is open (the loop is paused; this closes the door fully).
-    studio = getattr(app.state, "studio", None)
-    if isinstance(studio, dict) and studio.get("active"):
+    # Phase 13: uses the shared studio_is_active() predicate (api/studio.py)
+    # instead of re-probing app.state.studio inline - one definition of "is
+    # Studio active", safe to call even when studio.enabled is False (the
+    # dict is always present and always {"active": False, ...} in that case).
+    if studio_is_active(app):
         await websocket.close(code=4409)  # policy: Object Learning Studio is open
         _LOG.info("ingest connection refused: Object Learning Studio is active")
         return

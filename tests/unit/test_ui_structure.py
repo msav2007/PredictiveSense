@@ -151,7 +151,7 @@ def test_overlay_unknown_label_is_exactly_unknown() -> None:
 
     overlay = _read(_STATIC / "features" / "overlay.js")
     assert "(was " not in overlay, "overlay.js must not render `(was <class>)` on the resting label"
-    assert 'resting = "Unknown"' in overlay
+    assert 'return "Unknown"' in overlay
     # the raw class is only used for the de-emphasised `secondary` real label and
     # the Diagnostics-only `suppressed` reveal, never for the unknown label.
     policy = _read(_STATIC / "features" / "policy.js")
@@ -165,6 +165,22 @@ def test_overlay_never_touches_the_video_element() -> None:
     assert "getContext" in overlay
     for banned in ("video.src =", "video.srcObject =", "drawImage(video", "video.play("):
         assert banned not in overlay, f"overlay.js must not do {banned!r}"
+
+
+def test_overlay_never_renders_a_learned_claim() -> None:
+    """Phase 13 Stage 2: a single-class crop classifier's softmax is
+    mathematically forced to ~100% for any crop, and it was being applied to
+    every accepted detection with no confidence floor or class-compatibility
+    check - the "learned: <class> <pct>%" badge actively misled physical
+    testing (docs/phase-reports/phase13-stage1-inspection.md section 4). It
+    is removed entirely, not merely gated, so it cannot silently reappear."""
+
+    overlay = _read(_STATIC / "features" / "overlay.js")
+    assert "learned" not in overlay.lower()
+    # No live code path reads either field any more (a comment documenting
+    # why is fine and expected; an actual property access is not).
+    assert "t.custom_class_name" not in overlay
+    assert "t.custom_class_confidence" not in overlay
 
 
 def test_extension_contract_documented_with_example() -> None:

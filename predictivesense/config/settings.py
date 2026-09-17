@@ -34,11 +34,14 @@ __all__ = [
     "PerceptionConfig",
     "PolicyVocabularyConfig",
     "PolicyConfig",
+    "TrackingConfig",
     "DatasetConfig",
     "EvalConfig",
     "ObjectsConfig",
     "BatchConfig",
     "CoverageTargetsConfig",
+    "ExternalDatasetConfig",
+    "TrainingConfig",
     "StudioConfig",
     "PanelConfig",
     "UiConfig",
@@ -441,6 +444,85 @@ class PolicyConfig(_Section):
         return value
 
 
+class TrackingConfig(_Section):
+    """Phase 9 multi-object tracker (``predictivesense/tracking/``) - pure,
+    dependency-free, consumes ``PerceptionFrame.detections`` and produces
+    ``Track`` objects. ``enabled=False`` reproduces Phase 8 exactly
+    (``StateSnapshot.tracks`` stays empty).
+
+    ``n_init`` and ``max_age_*`` are **measured, not invented**
+    (``scripts/track_threshold_derivation.py`` over a live real-time session
+    on ``data/raw`` - see ``results/track_thresholds.md`` and
+    ``docs/decisions.md``). Everything else here is a bounded-resource /
+    association-weight judgement call, documented individually below and in
+    ``docs/decisions.md``, cheap to revise once more footage exists.
+    """
+
+    enabled: bool = True
+    # Measured (results/track_thresholds.md): singleton-presence-run share
+    # 0.323 > 0.20 -> require 3 consecutive hits, not 2, to promote
+    # tentative -> confirmed (a 1-2 frame blip must not become an identity).
+    n_init: int = Field(gt=0, default=3)
+    # Measured: p95 interior miss-run length 11 cycles + 1 cycle margin.
+    max_age_frames: int = Field(gt=0, default=12)
+    # Measured: max_age_frames * interval_ms_p50 (47.0 ms) on the same session.
+    # Kept independently of max_age_frames (not re-derived from it) because the
+    # analysis cadence varies (section 7.2) - a coasting track's real-time
+    # budget is the smaller of the two.
+    max_age_ms: float = Field(gt=0.0, default=564.0)
+    # A track that has just left the frame border gets a much smaller miss
+    # budget than one that disappears mid-frame (Phase 9 section 6.3) - it is
+    # expected to be gone, not occluded.
+    border_exit_max_age_frames: int = Field(gt=0, default=1)
+    border_margin_frac: float = Field(ge=0.0, lt=0.5, default=0.02)
+    # Bounded state (section 5.6) - judgement defaults, not measured.
+    max_tracks: int = Field(gt=0, default=64)
+    class_vote_history: int = Field(gt=0, default=20)
+    # Re-association window (section 6.5): same order as max_age_frames - an
+    # object missing longer than its own coasting budget is past the window
+    # anyway, so this only matters for a track that fully expired (e.g. via
+    # border exit) and then returned quickly.
+    reassoc_window_frames: int = Field(gt=0, default=12)
+    # Association cost weights (section 5.3) - geometry + motion dominate;
+    # class agreement is a signal, never a gate (section 5.4). Normalised
+    # internally by their sum, so only the ratios matter.
+    assoc_iou_weight: float = Field(ge=0.0, default=0.5)
+    assoc_center_distance_weight: float = Field(ge=0.0, default=0.2)
+    assoc_size_ratio_weight: float = Field(ge=0.0, default=0.1)
+    assoc_motion_weight: float = Field(ge=0.0, default=0.2)
+    assoc_class_weight: float = Field(ge=0.0, default=0.1)
+    # A candidate pair is eligible only if it clears SOME geometric plausibility
+    # (iou > 0 or centres within half a diagonal) - class agreement alone can
+    # never manufacture a match (section 5.4).
+    assoc_min_score: float = Field(ge=0.0, le=1.0, default=0.3)
+    # Stage 2 (ByteTrack-style second pass, section 5.2): low-score detections
+    # recover an already-tracked object by IoU alone - class/motion are not
+    # trusted enough at this score to matter, and this pass never creates a
+    # new track (section 5.2/7 - a low-confidence single detection must not
+    # bypass n_init).
+    high_score_split: float = Field(ge=0.0, le=1.0, default=0.5)
+    stage2_iou_threshold: float = Field(ge=0.0, le=1.0, default=0.3)
+    # Re-association (section 6.5) uses the same cost function as stage 1 but a
+    # stricter floor - "an incorrectly reused id is worse than a new one".
+    reassoc_min_score: float = Field(ge=0.0, le=1.0, default=0.6)
+    # Phase 10 section 5: pose is bound to the person track it best overlaps,
+    # not drawn straight off the per-frame poses list, so it persists through
+    # a gap in the *engine's* own cadence/reuse bookkeeping (measured cause of
+    # the green-line restart - results/pose_continuity_raw.md). Minimum
+    # IoU between a pose's own box and a person track's box to bind (below
+    # this, no assignment - section 5.3, "ambiguity resolves to no
+    # assignment"). Judgement default: low enough to tolerate the pose and
+    # detector boxes disagreeing slightly (different models, same person),
+    # high enough to reject a pose that plainly belongs to someone else.
+    pose_bind_min_iou: float = Field(ge=0.0, le=1.0, default=0.1)
+    # Measured (results/pose_continuity_raw.md): the empty-pose-gap runs
+    # observed on a 40s live session topped out at 9 consecutive snapshots
+    # (~580ms at the measured ~65ms snapshot interval). 900ms covers the
+    # observed worst case with margin without holding a pose indefinitely -
+    # re-derive once more footage exists, same caveat as n_init/max_age.
+    pose_max_age_ms: float = Field(gt=0.0, default=900.0)
+
+
 class DatasetConfig(_Section):
     """Phase 2.5 labelled evaluation set (COCO detection JSON)."""
 
@@ -517,9 +599,59 @@ class ObjectsConfig(_Section):
     batch: BatchConfig = Field(default_factory=BatchConfig)
 
 
+class ExternalDatasetConfig(_Section):
+    """Phase 12 - imported external training data, strictly separate from
+    ``objects.root`` (our own Studio collection) and ``dataset.root`` (our own
+    held-out evaluation set). Never git-committed; only manifests/hashes are.
+    Referenced source images live outside the repo (e.g. a FiftyOne download
+    directory) and are never copied here - see ``docs/decisions.md`` Phase 12.
+    """
+
+    root: Path = Field(default=Path("data/external"))
+
+
+class TrainingConfig(_Section):
+    """Phase 12 - the one config surface the crop-classifier training pipeline
+    was missing (``docs/decisions.md`` Phase 11 Part B: the classifier
+    registry path was hardcoded to the repo root, unlike every other data
+    root in this app). Overriding this field is what makes the registry
+    test-isolatable the same way ``objects.root`` already is; the default
+    reproduces the exact previous hardcoded path so normal usage is
+    unchanged."""
+
+    classifier_registry_path: Path = Field(default=Path("models/classifier_registry.json"))
+    # Phase 13 Stage 2: off by default. The Object Learning Studio's trained
+    # crop-classifier is being set aside as a separate experiment (see
+    # docs/phase-reports/phase13-stage1-inspection.md) - a single-class
+    # classifier's softmax is mathematically forced to ~100% regardless of the
+    # crop, and it was being applied to every accepted detection regardless of
+    # class, rendered on the live overlay with no confidence floor. When this
+    # is false, predictivesense/pipeline/loop.py never imports
+    # predictivesense.training.classifier_registry or
+    # predictivesense.perception.classifier, and every Detection/Track's
+    # custom_class_name/custom_class_confidence stays None end to end - the
+    # live detection path has zero Studio-trained-model dependency. Flip this
+    # on to re-run the experiment; nothing about the trained artifact,
+    # registry, or Studio data is deleted.
+    classifier_enabled: bool = False
+
+
 class StudioConfig(_Section):
     """Phase 4 Studio lifecycle."""
 
+    # Phase 13 Stage 2: off by default - the Object Learning Studio (data
+    # collection UI + bulk-upload + training-status routes) is being set
+    # aside as a separate experiment, not deleted. When false, create_app()
+    # never mounts the objects/object_batches/studio routers and never wires
+    # app.state.studio / app.state.batch_proposals_executor, so the
+    # application runs correctly and completely without it (GET /studio,
+    # /api/objects*, /api/objects/*/batches* simply 404 - no crash, no hidden
+    # dependency). All Studio source, data (data/objects/) and registry
+    # entries (models/classifier_registry.json) remain intact and importable;
+    # only the shipped dev/eval profiles turn this back on for the developer's
+    # own day-to-day data-collection workflow (config/profiles/dev.yaml,
+    # config/profiles/eval.yaml) - a bare AppConfig() ships it off.
+    enabled: bool = False
     # Entering /studio stops the monitoring pipeline (worker terminated, ingest
     # socket closed, perception disabled, analysis loop paused). Leaving restores
     # it. Off is unsupported by the UI and only exists for tests.
@@ -580,9 +712,12 @@ class AppConfig(BaseSettings):
     video: VideoConfig = Field(default_factory=VideoConfig)
     perception: PerceptionConfig = Field(default_factory=PerceptionConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    tracking: TrackingConfig = Field(default_factory=TrackingConfig)
     dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
     objects: ObjectsConfig = Field(default_factory=ObjectsConfig)
+    external: ExternalDatasetConfig = Field(default_factory=ExternalDatasetConfig)
+    training: TrainingConfig = Field(default_factory=TrainingConfig)
     studio: StudioConfig = Field(default_factory=StudioConfig)
     ui: UiConfig = Field(default_factory=UiConfig)
 

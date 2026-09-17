@@ -164,6 +164,8 @@ objects:
     min_image_px: 32
 
 studio:
+  # Phase 13 Stage 2: code default is false; re-enabled here (see dev.yaml).
+  enabled: true
   stop_monitoring_on_enter: true
 
 ui:

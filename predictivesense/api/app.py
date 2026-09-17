@@ -159,8 +159,10 @@ def create_app(
             # poll's timeout (the Phase 7/8 `test_duplicate_detection_flags...`
             # flake, docs/phase-reports/phase8.md §7). Scoped to the app and
             # drained on shutdown instead: each app gets its own worker and no
-            # test can queue behind another's.
-            _app.state.batch_proposals_executor.shutdown(wait=True)
+            # test can queue behind another's. Phase 13: only created at all
+            # when Studio is enabled (see below).
+            if _app.state.batch_proposals_executor is not None:
+                _app.state.batch_proposals_executor.shutdown(wait=True)
 
     app = FastAPI(
         title="PredictiveSense",
@@ -181,7 +183,15 @@ def create_app(
     app.state.policy = analysis_loop.policy
     app.state.session_id = uuid.uuid4().hex
     # Phase 4: Object Learning Studio lifecycle. While active, the analysis loop
-    # is paused and api/ingest.py refuses new frames.
+    # is paused and api/ingest.py refuses new frames. Phase 13 Stage 2:
+    # config.studio.enabled is off by default - the Studio experiment is set
+    # aside, not deleted (docs/phase-reports/phase13-stage1-inspection.md
+    # section 10). When disabled: the objects/object_batches/studio routers
+    # are never mounted (their routes simply 404, no crash), app.state.studio
+    # stays a benign always-inactive dict (api/ingest.py's 4409 refusal check
+    # already treats a missing/inactive dict as "not active"), and no
+    # dedicated proposal-worker thread is created. All Studio source, data,
+    # and registry entries remain intact and importable.
     app.state.studio = {"active": False, "token": None, "prior": None}
     app.state.ingest_stats = {
         "frames": 0.0,
@@ -190,21 +200,25 @@ def create_app(
         "clock_offset_s": 0.0,
         "clock_offset_rtt_ms": 0.0,
     }
-    # Phase 7 bulk-upload proposal worker: one dedicated thread per app (never a
-    # process-wide singleton - see the lifespan shutdown above). The proposal
-    # step reuses the single shared ONNX session, so detector calls must stay
-    # serialised (never one session per image, BLOCK 7).
-    app.state.batch_proposals_executor = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="batch-proposals"
-    )
+    if config.studio.enabled:
+        # Phase 7 bulk-upload proposal worker: one dedicated thread per app
+        # (never a process-wide singleton - see the lifespan shutdown above).
+        # The proposal step reuses the single shared ONNX session, so
+        # detector calls must stay serialised (never one session per image,
+        # BLOCK 7).
+        app.state.batch_proposals_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="batch-proposals"
+        )
+        app.include_router(objects_router.router)
+        app.include_router(object_batches_router.router)
+        app.include_router(studio_router.router)
+    else:
+        app.state.batch_proposals_executor = None
 
     app.include_router(ingest_router.router)
     app.include_router(recorder_router.router)
     app.include_router(videos_router.router)
     app.include_router(labels_router.router)
-    app.include_router(objects_router.router)
-    app.include_router(object_batches_router.router)
-    app.include_router(studio_router.router)
     if _STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
@@ -238,6 +252,9 @@ def create_app(
             "provider_reason": perc.get("provider_reason"),
             "available_providers": _available_ort_providers(),
             "model_version": loop.model_version,
+            # Phase 11 Part B section 13.3: "none" = baseline (no validated
+            # classifier active, or rolled back) - never a placeholder name.
+            "custom_classifier_version": loop.custom_classifier_version,
             "scheduler": config.consumer.scheduler,
             "max_frame_age_ms": config.analysis.max_frame_age_ms,
             "pose_cadence": config.perception.pose_cadence,
@@ -333,6 +350,7 @@ def _write_session_manifest(config: AppConfig, app: FastAPI) -> None:
                     "active_provider": perc.get("detector_ep") or loop.active_provider,
                     "provider_resolved": perc.get("provider_resolved"),
                     "model_version": loop.model_version,
+                    "custom_classifier_version": loop.custom_classifier_version,
                     "intra_op_threads": config.perception.intra_op_threads,
                     "detector_input_size": config.perception.detector.input_size,
                     "pose_cadence": config.perception.pose_cadence,

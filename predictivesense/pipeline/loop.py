@@ -15,13 +15,14 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from predictivesense.camera.mailbox import LatestFrameMailbox
 from predictivesense.camera.source import FrameSource, create_frame_source
 from predictivesense.config.settings import AppConfig, ConfigError
 from predictivesense.core.enums import SourceKind
-from predictivesense.core.types import Detection, PerceptionFrame, Pose, StateSnapshot
+from predictivesense.core.types import Detection, PerceptionFrame, Pose, StateSnapshot, Track
 from predictivesense.logging_setup import get_logger
 from predictivesense.perception.engine import PerceptionEngine, build_perception
 from predictivesense.perception.policy import RecognitionPolicy
@@ -32,6 +33,7 @@ from predictivesense.pipeline.perception_frame import (
 from predictivesense.pipeline.scheduler import run_completion_consumer
 from predictivesense.telemetry.metrics import MetricRegistry
 from predictivesense.telemetry.stages import FrameStages, record_stages
+from predictivesense.tracking import Tracker
 
 __all__ = ["AnalysisLoop", "build_loop", "build_camera_source"]
 
@@ -40,6 +42,7 @@ __all__ = ["AnalysisLoop", "build_loop", "build_camera_source"]
 _PERCEPTION_LATENCY_WINDOW = 600
 
 _LOG = get_logger(__name__)
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _JOIN_TIMEOUT_S = 5.0
 _MAX_STALL_S = 10.0  # debug consumer stall ceiling (preview-independence check)
 SnapshotListener = Callable[[StateSnapshot], None]
@@ -57,6 +60,9 @@ class AnalysisLoop:
         registry: MetricRegistry | None = None,
         perception: PerceptionEngine | None = None,
         policy: RecognitionPolicy | None = None,
+        tracker: Tracker | None = None,
+        classifier: Any | None = None,
+        classifier_version_id: str | None = None,
     ) -> None:
         self._config = config
         self._source = source
@@ -64,6 +70,33 @@ class AnalysisLoop:
         self.metrics = registry or MetricRegistry()
         self._perception = perception
         self._policy = policy
+        self._tracker = tracker
+        self._last_tracks: list[Track] = []
+        if tracker is not None:
+            self.metrics.samples("tracker_update_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
+            # Phase 11 section 4: the age of what is actually rendered right now,
+            # not what was computed - distinct from stage_capture_to_snapshot_ms
+            # (Phase 8), which only covers capture -> this snapshot's own frame.
+            self.metrics.samples("displayed_pose_age_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
+            self.metrics.samples("displayed_track_age_ms", maxlen=_PERCEPTION_LATENCY_WINDOW)
+        # Phase 11 Part B section 16: a validated, ACTIVE custom crop
+        # classifier, if one exists - resolved once, here, exactly like the
+        # detector model version (section 13.3: "the live pipeline resolves
+        # the active model through the existing registry"). Loaded through
+        # ONNX Runtime only (predictivesense/perception/classifier.py) - never
+        # torch. A classifier activated/rolled back while this loop is
+        # already running takes effect on the next restart, not live: this is
+        # a stated limitation (docs/decisions.md), not silent staleness - the
+        # active version id this loop resolved is reported in Diagnostics.
+        self._classifier = classifier
+        self._classifier_version_id = classifier_version_id or ("none" if classifier is None else "injected")
+        # Phase 13 Stage 2: off by default (config.training.classifier_enabled)
+        # - the live detection path must not import the Studio-trained
+        # classifier registry/model at all unless explicitly turned back on.
+        # See docs/phase-reports/phase13-stage1-inspection.md section 10.
+        if classifier is None and config.training.classifier_enabled:
+            self._resolve_active_classifier(config)
+
         self._perception_frames = 0
         self._perception_errors = 0
         self._policy_counts = None  # accumulated PolicyCounts, most recent apply
@@ -160,6 +193,14 @@ class AnalysisLoop:
         """Active model registry ``version_id``, or ``"unknown"``."""
 
         return self._model_version
+
+    @property
+    def custom_classifier_version(self) -> str:
+        """Active custom crop-classifier ``version_id``, or ``"none"`` when no
+        validated classifier is active (baseline / detector-only recognition,
+        Phase 11 Part B section 13.3)."""
+
+        return self._classifier_version_id
 
     @property
     def source(self) -> FrameSource:
@@ -413,10 +454,55 @@ class AnalysisLoop:
         if frame is not None and self._perception is not None:
             detections, poses, perception_metrics = self._run_perception(frame)
 
+        # Phase 9: the tracker only ever sees a frame that actually arrived
+        # this cycle - never a stale one (section 10.2). On a stale/no-frame
+        # cycle the tracker performs no update (its internal state literally
+        # has not changed), so the last real track list is reported unchanged
+        # rather than wiped to empty.
+        tracks: list[Track] = self._last_tracks
+        if frame is not None and self._tracker is not None:
+            _tracker_t0 = time.perf_counter()
+            tracks = self._tracker.update(
+                detections, frame_id=frame.frame_id, capture_ts=frame.capture_ts,
+                frame_width=float(frame.width), frame_height=float(frame.height),
+                poses=poses, pose_fresh=perception_metrics.get("pose_reused", 0.0) < 1.0,
+            )
+            tracker_ms = (time.perf_counter() - _tracker_t0) * 1000.0
+            self.metrics.samples("tracker_update_ms").add(tracker_ms)
+            perception_metrics["tracker_update_ms"] = tracker_ms
+            self._last_tracks = tracks
+
         emitted_ts = time.monotonic()
         frame_age_ms = (
             (emitted_ts - capture_ts) * 1000.0 if capture_ts is not None else None
         )
+
+        # Phase 11 section 4: the age of the pose/track state actually being
+        # rendered right now (emitted_ts, this snapshot's own publish instant)
+        # minus the capture_ts of the underlying measurement each track
+        # carries - NOT this frame's own capture_ts (that is frame_age_ms /
+        # stage_capture_to_snapshot_ms, an unrelated Phase 8 number: how old
+        # THIS frame's own detection is, not how old the DISPLAYED track/pose
+        # state is, which may be several cycles behind on a coasting/reused
+        # binding). -1.0 = nothing currently displayed to measure.
+        displayed_pose_age_ms = -1.0
+        displayed_track_age_ms = -1.0
+        if tracks:
+            displayed_track_age_ms = max(
+                (emitted_ts - tr.last_detection_capture_ts) * 1000.0 for tr in tracks
+            )
+            pose_ages = [
+                (emitted_ts - tr.pose_capture_ts) * 1000.0
+                for tr in tracks
+                if tr.pose_capture_ts is not None
+            ]
+            if pose_ages:
+                displayed_pose_age_ms = max(pose_ages)
+        if self._tracker is not None:
+            if displayed_track_age_ms >= 0.0:
+                self.metrics.samples("displayed_track_age_ms").add(displayed_track_age_ms)
+            if displayed_pose_age_ms >= 0.0:
+                self.metrics.samples("displayed_pose_age_ms").add(displayed_pose_age_ms)
 
         iter_latency_ms = (time.perf_counter() - t0) * 1000.0
         self._last_iter_ms = iter_latency_ms
@@ -442,6 +528,8 @@ class AnalysisLoop:
             ),
             "frame_age_ms": frame_age_ms if frame_age_ms is not None else -1.0,
             "dropped_stale": float(self._dropped_stale),
+            "displayed_pose_age_ms": displayed_pose_age_ms,
+            "displayed_track_age_ms": displayed_track_age_ms,
         }
         self._merge_source_metrics(metrics)
         self._add_frame_counters(metrics, stats)
@@ -458,12 +546,15 @@ class AnalysisLoop:
             tr.pose_ms = perception_metrics.get("pose_ms")
             tr.pose_reused = pose_stale
             tr.policy_ms = perception_metrics.get("policy_ms")
+            tr.tracker_ms = perception_metrics.get("tracker_update_ms")
             if tr.detector_ms is not None and tr.detector_ms < 0:
                 tr.detector_ms = None
             if tr.pose_ms is not None and tr.pose_ms < 0:
                 tr.pose_ms = None
             if tr.policy_ms is not None and tr.policy_ms < 0:
                 tr.policy_ms = None
+            if tr.tracker_ms is not None and tr.tracker_ms < 0:
+                tr.tracker_ms = None
             tr.snapshot_ts = time.monotonic()
             stages = record_stages(tr, self.metrics, frame_id=frame.frame_id)
             self._frame_stages.append(stages)
@@ -483,7 +574,8 @@ class AnalysisLoop:
 
         # Phase 8 section 16: the immutable, tracking-ready per-frame record.
         # Built for every analysed frame, real-time and recorded alike, via the
-        # same helper. StateSnapshot.tracks stays empty - nothing here is a track.
+        # same helper. Phase 9: StateSnapshot.tracks is now populated by
+        # self._tracker (see above) when tracking is enabled.
         if frame is not None:
             pose_src = perception_metrics.get("pose_src_frame_id", -1.0)
             pose_age = perception_metrics.get("pose_age_ms", -1.0)
@@ -511,7 +603,7 @@ class AnalysisLoop:
             frame_age_ms=frame_age_ms,
             detections=detections,
             poses=poses,
-            tracks=[],
+            tracks=tracks,
             risk=None,
             metrics=metrics,
             stale=stale,
@@ -585,6 +677,71 @@ class AnalysisLoop:
         metrics["dropped_mailbox"] = dropped_mailbox
         metrics["frames_in_flight"] = in_flight
 
+    def _resolve_active_classifier(self, config: AppConfig) -> None:
+        """Load the active custom classifier, if any (Phase 11 Part B).
+        Never raises into loop construction - an absent/broken classifier
+        registry degrades to baseline (detector-only) recognition, logged
+        once, exactly like a missing detector weight degrades to Phase 1.6
+        behaviour (`perception.engine.build_perception`)."""
+
+        try:
+            from predictivesense.training.classifier_registry import ClassifierRegistry
+
+            registry_path = _REPO_ROOT / config.training.classifier_registry_path
+            entry = ClassifierRegistry(path=registry_path).active()
+        except Exception as exc:  # noqa: BLE001 - registry absent/corrupt must not crash
+            _LOG.debug("custom classifier registry unavailable: %r", exc)
+            return
+        if entry is None:
+            return
+        try:
+            from predictivesense.perception.classifier import CropClassifierModel
+
+            self._classifier = CropClassifierModel(
+                entry.artifact_path, class_map=entry.class_map, image_size=entry.image_size,
+                provider=config.perception.provider,
+            )
+            self._classifier_version_id = entry.version_id
+            _LOG.info("custom classifier active: %s (classes=%s)", entry.version_id, sorted(entry.class_map))
+        except Exception as exc:  # noqa: BLE001 - a bad artifact must not crash the loop
+            _LOG.warning("failed to load active custom classifier %s: %r", entry.version_id, exc)
+            self._classifier = None
+            self._classifier_version_id = "none"
+
+    def _apply_custom_classifier(
+        self, detections: list[Detection], frame: Any
+    ) -> tuple[list[Detection], float]:
+        """Section 16: a SEPARATE, additive pass over already-policy-decided
+        detections. Never touches ``class_name`` / ``policy_state`` / ``tier``
+        - only ever adds ``custom_class_name`` / ``custom_class_confidence``,
+        so the recognition policy's own decisions are unchanged whether or
+        not a custom classifier is active. Real inference only (no cache, no
+        filename or image-specific rule) - a fresh crop, every call."""
+
+        t0 = time.perf_counter()
+        updated: list[Detection] = []
+        for d in detections:
+            if d.policy_state not in ("accepted", "accepted_secondary"):
+                updated.append(d)
+                continue
+            try:
+                x1, y1, x2, y2 = d.bbox
+                h, w = frame.image.shape[:2]
+                xi0, yi0 = max(0, int(x1)), max(0, int(y1))
+                xi1, yi1 = min(w, int(x2)), min(h, int(y2))
+                crop = frame.image[yi0:yi1, xi0:xi1]
+                if crop.size == 0:
+                    updated.append(d)
+                    continue
+                name, confidence = self._classifier.infer_crop(crop)
+                updated.append(d.model_copy(update={
+                    "custom_class_name": name, "custom_class_confidence": confidence,
+                }))
+            except Exception as exc:  # noqa: BLE001 - never let a classifier bug drop a frame
+                _LOG.debug("custom classifier failed on frame %s: %r", frame.frame_id, exc)
+                updated.append(d)
+        return updated, (time.perf_counter() - t0) * 1000.0
+
     def _run_perception(
         self, frame: Any
     ) -> tuple[list[Detection], list[Pose], dict[str, float]]:
@@ -629,6 +786,13 @@ class AnalysisLoop:
                 "policy_ms_p95": pol_samples.p95 if pol_samples.count else -1.0,
             }
 
+        # Phase 11 Part B section 16: additive custom-classifier pass, after
+        # the policy so its decisions are never touched. Zero cost when no
+        # classifier is active/validated (self._classifier stays None).
+        custom_classifier_ms = -1.0
+        if self._classifier is not None and out_detections:
+            out_detections, custom_classifier_ms = self._apply_custom_classifier(out_detections, frame)
+
         det_samples = self.metrics.samples("detector_ms")
         pose_samples = self.metrics.samples("pose_ms")
         if result.detector_ms is not None:
@@ -655,6 +819,7 @@ class AnalysisLoop:
             "detections_per_frame": float(len(out_detections)),
             "poses_per_frame": float(len(result.poses)),
             "perception_frame_errors": float(self._perception_errors),
+            "custom_classifier_ms": custom_classifier_ms,
             # Phase 8 pose-cadence provenance (section 9).
             "pose_reused": 1.0 if result.pose_reused else 0.0,
             "pose_age_ms": result.pose_age_ms if result.pose_age_ms is not None else -1.0,
@@ -775,22 +940,32 @@ def build_loop(
     registry: MetricRegistry | None = None,
     perception: PerceptionEngine | None = None,
     policy: RecognitionPolicy | None = None,
+    tracker: Tracker | None = None,
 ) -> AnalysisLoop:
-    """Construct a loop with the frame source, perception engine and recognition
-    policy from ``config``.
+    """Construct a loop with the frame source, perception engine, recognition
+    policy and tracker from ``config``.
 
     Perception is built from ``config.perception`` unless one is passed in. A
     missing weight file degrades to no perception (Phase 1.6 behaviour) rather
     than raising - see :func:`predictivesense.perception.engine.build_perception`.
     The recognition policy (Phase 2.5) is built from ``config.policy``; with
     ``policy.enabled`` false it is a pass-through and the pipeline behaves
-    exactly as Phase 2 did.
+    exactly as Phase 2 did. The tracker (Phase 9) is built from
+    ``config.tracking``; with ``tracking.enabled`` false no tracker is built at
+    all and ``StateSnapshot.tracks`` stays empty, reproducing Phase 8 exactly.
     """
 
     source = build_camera_source(config)
     mailbox = LatestFrameMailbox()
     engine = perception if perception is not None else build_perception(config)
     pol = policy if policy is not None else RecognitionPolicy(config.policy)
+    if tracker is not None:
+        trk = tracker
+    elif config.tracking.enabled:
+        trk = Tracker(config.tracking)
+    else:
+        trk = None
     return AnalysisLoop(
-        config, source, mailbox, registry=registry, perception=engine, policy=pol
+        config, source, mailbox, registry=registry, perception=engine, policy=pol,
+        tracker=trk,
     )

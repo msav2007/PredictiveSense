@@ -237,6 +237,12 @@ objects:
     min_image_px: 32
 
 studio:
+  # Phase 13 Stage 2: the code default is now false (the Studio experiment is
+  # set aside - docs/phase-reports/phase13-stage1-inspection.md section 10).
+  # Explicitly re-enabled here so the developer's existing day-to-day
+  # data-collection workflow (data/objects/, /studio) is unaffected; a bare
+  # AppConfig() with no profile ships it off.
+  enabled: true
   # Entering /studio stops monitoring (worker terminated, ingest socket closed,
   # perception disabled, analysis loop paused); leaving restores it exactly.
   stop_monitoring_on_enter: true

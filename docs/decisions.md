@@ -1503,3 +1503,54 @@ Full trace, measurements and physical-verification status:
   the detector's own weights - only the registry's metadata (paths,
   hashes, metrics) is source-of-truth-tracked.
 
+## Phase 13 Stage 2 - Object Learning Studio isolated behind an off-by-default flag (2026-09-17)
+
+Full Stage 1 architecture report, dependency map, and Studio coupling audit
+(19 points) at `docs/phase-reports/phase13-stage1-inspection.md`. The report's
+§4 traced the physically-observed "learned: watch 100%" overlay to real,
+uncached per-frame ONNX inference from a **single-class** crop classifier
+(`models/classifier_registry.json`, class_map `{"watch": 0}`) - softmax over
+one logit is mathematically forced to ~100% for any crop, and the loop applied
+it to every policy-accepted detection regardless of class
+(`predictivesense/pipeline/loop.py` `_apply_custom_classifier`,
+`policy_state in ("accepted","accepted_secondary")` with no class check).
+
+Two new config flags, both **off by default** (a bare `AppConfig()` ships both
+off):
+
+- `TrainingConfig.classifier_enabled` (`predictivesense/config/settings.py`) -
+  gates the single call site in `AnalysisLoop.__init__`
+  (`pipeline/loop.py`) that resolves the active crop classifier. When false,
+  `_resolve_active_classifier` is never called, so `pipeline/loop.py` never
+  imports `predictivesense.training.classifier_registry` or
+  `predictivesense.perception.classifier` - the live detection path has zero
+  dependency on the Studio-trained artifact. `Detection`/`Track.custom_class_*`
+  stay `None` end to end (the fields themselves are additive/frozen contract
+  fields, kept for when the experiment is revisited - see Stage 9).
+- `StudioConfig.enabled` (`predictivesense/config/settings.py`) - gates
+  whether `create_app()` mounts the `objects`/`object_batches`/`studio`
+  routers and creates `app.state.batch_proposals_executor`. When false,
+  `GET /studio`, `/api/objects*`, `/api/objects/*/batches*` simply 404 (route
+  not registered) - no crash, no partial state. `app.state.studio` is still
+  set to the benign always-inactive `{"active": False, ...}` dict either way,
+  so `api/ingest.py`'s 4409 refusal (now routed through the shared
+  `studio_is_active()` helper in `api/studio.py` instead of a second inline
+  duplicate of the same check) is unaffected.
+
+`config/profiles/dev.yaml` and `config/profiles/eval.yaml` explicitly set
+`studio.enabled: true` (re-opting in) so the developer's existing
+data-collection workflow at `/studio` is unaffected - only `training.
+classifier_enabled` stays off in both, since re-enabling live inference on a
+single-class model would just reproduce the original defect. No Studio
+source, `data/objects/` sample, or registry entry was deleted or modified by
+this change.
+
+`predictivesense/api/static/features/overlay.js`'s "learned: …" badge block
+was deleted outright (not merely gated) per the prompt's explicit instruction
+- it had no confidence floor and no class-compatibility check, so leaving it
+gated-but-present would let it silently reappear, in the same misleading
+form, the moment someone flips `classifier_enabled` back on for a legitimate
+multi-class re-run, without the render-side defects also being fixed. The
+underlying `custom_class_name`/`custom_class_confidence` wire fields remain
+(frozen, additive contract) for a future phase's proper integration
+(Stage 9's "custom classes are not automatically primary-tier" question).
