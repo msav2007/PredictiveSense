@@ -125,6 +125,13 @@ class PoseEstimator:
                     bbox=(x1, y1, x2, y2),
                     score=float(score),
                     frame_id=frame.frame_id,
+                    # Phase 11 section 4/5: stamped once, here, at the true
+                    # measurement instant. Reused across cadence-due cycles by
+                    # PerceptionEngine (the same frozen object handed back
+                    # unmodified), this is what lets the tracker's pose
+                    # binding measure real age instead of resetting it on
+                    # every reuse rebind (docs/decisions.md, Phase 11).
+                    capture_ts=frame.capture_ts,
                 )
             )
         return poses

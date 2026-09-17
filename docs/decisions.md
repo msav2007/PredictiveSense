@@ -1094,3 +1094,63 @@ Full trace, measurements and physical-verification status:
   especially footage with a phone or watch at typical desk distance, before
   treating 480 as settled.
 
+## Phase 11
+
+- **2026-09-16** Root cause of the "continuous but not current" symptom
+  (Part A section 4): `Tracker._bind_poses` stamped a track's
+  `pose_capture_ts` with the CURRENT cycle's `capture_ts` ("now") on every
+  successful pose bind - fresh inference OR the perception engine's own
+  within-window reuse - instead of the pose's own true measurement instant.
+  Because the engine hands back the identical frozen `Pose` object on every
+  cadence-due reuse cycle (`pose_max_reuse_ms`), a track's reported
+  `pose_age_ms` was silently reset to ~0 on almost every cycle, hiding true
+  staleness that the (correctly implemented) `tracking.pose_max_age_ms`
+  bound was meant to cap. Measured before any fix
+  (`results/track_pose_freshness_before.md`, live 40s session, same clip as
+  Phase 10): `displayed_pose_age_ms` p50/p95/max = 93.9/144.7/**498.1**ms -
+  the max never exceeding `pose_max_reuse_ms` (500ms) is the numeric
+  fingerprint of the reset, since every successful bind (including a reuse
+  well inside its own window) clears the clock before the track-level bound
+  ever gets exercised.
+- **2026-09-16** Fix: added `capture_ts: float | None = None` to `Pose`
+  (`core/types.py`, additive per the Phase 0 frozen-contracts rule), stamped
+  once at true inference time in `perception/pose.py` and never touched
+  again. `Tracker._bind_poses` now records `pose.capture_ts` (falling back to
+  the current cycle's `capture_ts` only when a `Pose` was built without one -
+  back-compat for existing test fixtures) as the track's `pose_capture_ts`.
+  Zero new computation on the hot path (same values, different source
+  variable) - `tracker_update_ms` unaffected (see latency re-measurement
+  below). Re-measured, same clip, same 40s duration
+  (`results/track_pose_freshness_after.md`): p50/p95/max =
+  155.6/205.1/476.5ms; a longer 90s session
+  (`results/track_pose_freshness_after_90s.md`) reaches max=585.6ms -
+  **beyond** `pose_max_reuse_ms`, which was structurally almost unreachable
+  under the pre-fix reset bug and is now correctly, honestly measured. The
+  p50 rise (93.9 -> 155.6ms) on the identical before/after session is the
+  direct fingerprint of the fix: age no longer collapses to near-zero on
+  every reuse-cycle rebind.
+- **2026-09-16** `tracking.pose_max_age_ms` (900ms) is kept unchanged. The
+  post-fix measured worst case over a 90s live session (585.6ms pose /
+  711.2ms track) stays comfortably under it, and no measurement in this
+  session justifies moving the bound in either direction (section 5.1: derive
+  from measurement, do not pick a number - the disciplined choice here is to
+  change nothing without new evidence). Caveat carried forward explicitly:
+  this harness is a steady-state TestClient loopback with no real webcam
+  jitter or the background CPU contention Phase 10's own live session
+  measured (which found a materially worse 36.4% empty-pose rate); a real
+  physical session (section 18, developer, pending) may measure a worse
+  worst-case than this harness reproduces, and the bound should be
+  re-derived then if so.
+- **2026-09-16** Two new headline metrics, `displayed_pose_age_ms` /
+  `displayed_track_age_ms` (Part A section 4.1), added to the existing
+  `StateSnapshot.metrics` dict and `MetricRegistry` Samples in
+  `pipeline/loop.py` (`AnalysisLoop._iterate`) - no new telemetry system, per
+  section 22. Computed as `emitted_ts - track.<field>` (max across all
+  currently-rendered tracks, matching what `overlay.js` actually draws, per-
+  track tentative included), which is deliberately different from Phase 8's
+  `frame_age_ms` / `stage_capture_to_snapshot_ms` (how old THIS frame's own
+  detection is): a coasting or pose-reusing track can display a measurement
+  from several cycles earlier than the current frame. `-1.0` = nothing
+  currently displayed to measure (no tracks, or no track carries a bound
+  pose). Wired into Diagnostics (`groups/diagnostics.js` `PHASE8_METRICS`).
+
