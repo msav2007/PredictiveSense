@@ -1554,3 +1554,83 @@ multi-class re-run, without the render-side defects also being fixed. The
 underlying `custom_class_name`/`custom_class_confidence` wire fields remain
 (frozen, additive contract) for a future phase's proper integration
 (Stage 9's "custom classes are not automatically primary-tier" question).
+
+## Stage 2.5 verification (2026-09-17)
+
+Test numbers Stage 2.5 required but never recorded in-repo. Run on the
+primary dev machine (Windows-10-10.0.26200-SP0, no CUDA), after all eight
+Stage 2.5 commits landed and `origin/main...main` measured `0 0`:
+
+```
+.venv\Scripts\python -m pytest -q
+502 passed, 4 skipped, 49 warnings in 206.56s (0:03:26)
+
+.venv\Scripts\python -m pytest -q -m browser        # run 1
+27 passed, 479 deselected, 27 warnings in 47.58s
+
+.venv\Scripts\python -m pytest -q -m browser        # run 2
+27 passed, 479 deselected, 27 warnings in 46.44s
+```
+
+Both browser runs are clean - no failure to classify as flake or real. This
+matches the numbers already recorded once during the Stage 2.5 session
+itself (502/4/0, browser 27/0 twice); this entry is the first time they are
+committed to `docs/decisions.md` rather than only reported in chat.
+
+## Stage 5.1 - close out Stage 5 (2026-09-17)
+
+**Zero-box split defect, root cause and fix.** `build_detection_splits` stratifies
+groups per target class (`groups_by_class`); a group whose every image is a
+zero-box record (hard negative/background) has no primary class
+(`_primary_class` returns `None`), so it was never added to ANY entry of
+`groups_by_class` and therefore never appeared in the `assign` dict that
+splits get built from - 11 of 635 real images (all zero-box) silently fell
+through every stratum and landed in no split at all. Fixed by computing
+`zero_box_groups = set(by_group) - classified_groups` and giving them their
+own pseudo-class stratum (`_ZERO_BOX_STRATUM = "__zero_box__"`), split by the
+identical seeded shuffle-and-cut as every real class, explicitly exempted
+from `min_images_per_class` (a hard negative is not a trainable positive
+class - refusing to split it would just re-lose it a different way).
+`build_detection_splits` now also asserts, as an internal invariant, that
+`sum(len(split)) == len(store.image_ids())` before returning - a defensive
+second line, not a substitute for the two new tests
+(`test_every_image_lands_in_exactly_one_split`,
+`test_zero_box_images_are_assigned_to_a_split_not_dropped`).
+
+**Report figures corrected.** The Stage 5 report's "634 groups" claim was
+simply wrong - direct re-derivation (both before and after the zero-box fix)
+gives **623** groups pre-fix; the fix adds the 11 previously-orphaned
+zero-box groups, giving **634 groups post-fix** (coincidentally the same
+number Stage 5 guessed, for the wrong reason). Separately, `DetectionSplits`
+carried one field, `realized_per_class_counts`, holding BOX tallies under a
+name that reads as an image count - watch's reported "160/28/32" summed to
+220 boxes across only 187 images, and was misread as an image count while
+writing the Stage 5 report. Split into two explicitly-named fields,
+`realized_per_class_box_counts` and `realized_per_class_image_counts`
+(`to_doc()` format bumped 1 -> 2); every caller (`scripts/build_detection_dataset.py`,
+tests) updated. The store itself (`coco_detection.json`) was unaffected -
+only the split assignment and its reporting changed, so the build was
+re-run for real with the fix and produces a new split content hash
+(`65f5b55c2ca0bc77b7ef3fc33a71b58a1d96c2507325d4c0634032eef4b11f50`,
+replacing Stage 5's `676c8afc...`) - full corrected figures in
+`docs/phase-reports/phase13-stage5-dataset.md`.
+
+**`test_object_batches_api.py` flake, timeboxed (10-15 min).** Reproduced
+twice across 60 repeated standalone runs of the file (~3.3%): once a
+`KeyError: 'status'` in the test's own `_poll()` helper (the polled response
+body lacked a `status` key at that instant), once a plain
+`AssertionError: batch never reached 'ready'` after the fixed 50-try/2.5s
+budget with `processed == total` but `status` still `"processing"`. Checked
+the specific hypothesis the stage prompt named - a Phase 8-style
+module-level `ThreadPoolExecutor` shared across app instances - and it does
+**not** apply here: `api/app.py` creates and shuts down
+`app.state.batch_proposals_executor` per app instance (confirmed by
+reading, not assumed), so nothing is shared across tests. The actual
+mechanism is `_run_proposals` (background thread, `api/object_batches.py`)
+racing the test's own fixed poll budget under heavy concurrent CPU load -
+both repro instances happened while running this file back-to-back dozens
+of times in a tight loop for this very investigation, which is exactly the
+kind of load a normal single test run (or even a normal full-suite run)
+does not produce. Classified as a known, non-blocking, load-sensitive
+intermittent - not fixed, not a correctness bug in the app, out of this
+stage's explicit scope to fix. Recorded in `docs/PROJECT-STATE.md` §6.

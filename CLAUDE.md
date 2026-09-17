@@ -90,21 +90,22 @@ explicitly a cross-clock browser-vs-server comparison (see `docs/decisions.md`).
   `active` version, SHA-256-checked, no activation code. Unchanged and
   untouched by Phase 11 — the trained crop classifier has its own separate
   registry, see `training/` below.
-- `training/` — Phase 11 Part B, gated behind the `[train]` extra
-  (`torch`/`torchvision`/`onnxscript`; the only place they're imported —
-  never `api/`/`pipeline/`/`perception/`/`camera/`). `dataset.py` (Studio
-  samples -> crop records, role-aware), `splits.py` (session-**and**-
-  object-disjoint, per-class stratified), `synthetic_fixture.py` (a real,
-  on-disk fixture dataset for proving the pipeline without collection),
-  `model.py` (a small from-scratch CNN), `train.py` (real training + ONNX
-  export + run manifest), `classifier_registry.py` (trained -> validated ->
-  active -> rollback state machine, `models/classifier_registry.json`),
-  `evaluate.py` (accuracy/false-class-rate/latency, baseline vs custom).
-  Phase 12 additions, all additive: `dataset.py::build_crop_records`/
-  `validate_dataset` take an optional `external_manifests` sequence,
-  `CropRecord.source`/`DatasetSummary.per_source_counts` report composition;
-  `train.py::TrainConfig.external_manifests` passes them through. Still
-  stdlib-only (reads a plain JSON manifest) — never `pandas`/`fiftyone`.
+- `training/` — the **crop-classifier** experiment (Phase 11 Part B + Phase
+  12), gated behind the `[train]` extra (`torch`/`torchvision`/`onnxscript`;
+  the only place they're imported — never `api/`/`pipeline/`/`perception/`/
+  `camera/`). `dataset.py` (Studio samples -> crop records, role-aware, plus
+  Phase 12's optional `external_manifests`), `splits.py` (session-**and**-
+  object-disjoint, per-class stratified), `synthetic_fixture.py`, `model.py`
+  (a small from-scratch CNN), `train.py`, `classifier_registry.py`
+  (train -> validated -> active -> rollback, `models/classifier_registry.json`),
+  `evaluate.py`. **This is one experiment, not the project's training
+  direction** — its one shipped artifact (`watch`, single-class) is
+  deactivated (`docs/decisions.md` Phase 13 Stage 2 / Stage 2.5: a
+  single-class softmax is structurally degenerate) and `training.
+  classifier_enabled` defaults off. Left in place, untouched, per Stage 5's
+  explicit instruction — it does not overlap the detection-format dataset
+  path (`dataset/`, extended in Stage 5) that a future detector-fine-tuning
+  stage would actually use.
 - `api/` — `app.py` (factory + lifespan; owns `app.state.batch_proposals_executor`,
   created + shut down per app, never a module-level singleton), `broadcast.py`
   (push-on-publish `Broadcaster`), `ingest.py`/`recorder.py`/`videos.py`/
@@ -158,89 +159,36 @@ Full command reference (per-phase eval/labelling/export workflows): `projectCont
 
 ## Current phase status
 
-**Phase 12 (external dataset import + proven one-class training path) —
-automated work complete on all three parts, physical verification pending.**
-See `docs/phase-reports/phase12.md` (three-part: Measured / Physically
-observed pending / Not verified).
+**Phase 12** (external dataset import + one-class crop-classifier proof) is
+done; see `docs/phase-reports/phase12.md`. Its one trained artifact
+(`watch`, single-class) is **deactivated** — see Phase 13 Stage 2 below.
 
-**Part A (why the Comb is not recognised, P0)**: traced from the code — the
-Comb reached the sample store fine (2 samples), but the only two prior
-training runs were on Phase 11's synthetic fixture (never Comb, never any
-real class), neither was active, and the active model was still the
-pretrained baseline detector whose fixed COCO-80 vocabulary cannot emit
-"comb" at all. **No bug in the recognition path** — exactly the "no custom
-model has ever been trained" finding the prompt itself called most likely.
-Adjacent real issue fixed: two stray fixture-trained artifacts had leaked
-into the *production* `models/classifier_registry.json`/`models/custom/`
-(test/dev-command residue) — removed, and the registry's long-open
-test-isolation gap (`docs/decisions.md` Phase 11) is now closed via a new
-`AppConfig.training.classifier_registry_path` field, used consistently by
-the live loop, the Diagnostics API, and all three CLI scripts.
+**Phase 13** — perception rebuild, in progress:
+- **Stage 1** (architecture/inspection report): done. Traced the physically-
+  observed "learned: watch 100%" overlay to a single-class softmax
+  structurally forced to ~100% for any input. See
+  `docs/phase-reports/phase13-stage1-inspection.md`.
+- **Stage 2** (Studio isolated behind off-by-default flags): done.
+  `TrainingConfig.classifier_enabled` / `StudioConfig.enabled` both default
+  off; the misleading "learned: …" overlay badge was deleted outright, not
+  merely gated. See `docs/decisions.md` Phase 13 Stage 2.
+- **Stage 2.5** (preserve the work): done. Phases 9–13 committed and pushed
+  (`origin/main...main` = `0 0`), `.gitattributes` normalises line endings,
+  the degenerate classifier entry carries a recorded `superseded_reason`.
+  Full suite 502 passed / 4 skipped / 0 failed, browser suite clean twice —
+  see `docs/decisions.md` "Stage 2.5 verification".
+- **Stage 5 / 5.1** (detection-format dataset + split machinery): done. 635
+  images / 937 boxes, classes `watch` + `mug/cup`, every image in exactly
+  one split (Stage 5.1 fixed an 11-image zero-box gap — see
+  `docs/decisions.md` "Stage 5.1"). Builds a parallel detection-dataset path
+  in `dataset/`; does not touch `training/`'s crop-classifier path or train
+  anything. See `docs/phase-reports/phase13-stage5-dataset.md`.
 
-**Part B (external dataset import, P1)**: audited the developer's Open
-Images V7 download (5000 images) directly from its raw export files before
-importing anything (`results/external_dataset_audit.json`/`.md`) — the
-master `detections.csv`/`image_ids.csv` turned out to be FiftyOne's full,
-unfiltered multi-split files, filtered here to this download's own image
-IDs. Produced an explicit, reviewable class mapping
-(`results/external_class_mapping.json`): 10 classes mapped, `pencil` /
-`charger` / `comb` confirmed unavailable, `shaker` explicitly **rejected**
-(not merely unmapped — a genuinely different object). `data/external/` is a
-new, third, git-ignored, strictly-separate store; nothing is copied, only
-referenced by path + SHA-256. `scripts/import_external_dataset.py` filters
-bad boxes with counted reasons, deduplicates within and across stores, and
-**hard-fails the whole import on any external↔eval collision** (none
-occurred for the real Watch import: 220 positive crops / 187 images + 40
-hard-negative crops from Mobile-phone boxes). Feeds the **existing** Phase
-11 pipeline unchanged — `CropRecord.source` (previously unused) now tags
-external samples, session keys make them image-disjoint by construction (no
-`splits.py` changes needed), and `DatasetSummary.per_source_counts` reports
-composition per source in every run manifest.
-
-**Part C (prove the complete path on one class, exit condition)**: chose
-`watch` (189 external images; the developer's own Studio `watch` samples had
-already been soft-deleted earlier this session with no restore path — given
-the choice, the developer chose **external-only training, gap honestly
-reported** over resurrecting deleted files or proving on `comb` (2 samples,
-no external data)). Real artifact trained
-(`models/custom/crop-clf-2026-09-16T1404-78a4bdb3/model.onnx`), validated
-(with an explicitly documented, non-default `--max-false-class-rate 1.0`
-override — the default 0.5 gate assumes an eventual multi-class deployment;
-a genuine one-class softmax cannot structurally clear it, and reporting that
-honestly was chosen over hiding it), and **activated**. `accuracy=1.000` /
-`false_class_rate=1.000` are both mathematically forced by training exactly
-one class, not a quality claim. **No held-out data of our own exists for
-`watch`** — every number is against the external test split; this is stated,
-not hidden, and is the developer's next physical-collection priority.
-
-Full suite: **494 passed, 4 skipped, 0 failed** (`pytest -q`, all markers
-including `browser`/`models`/`train`/`external`, CPU-only). Also found and
-fixed a real, pre-existing environment contamination unrelated to this
-phase's own code: `fiftyone` had been installed directly into this project's
-shared `.venv`, silently upgrading `starlette` to a version incompatible
-with the pinned `fastapi`, which was silently failing collection of most of
-the API integration suite before this phase touched anything — fixed by
-reinstalling the compatible `starlette`, with a strong recommendation
-(`docs/decisions.md`) never to install `fiftyone` into this venv again.
-
-Carried forward, not blockers:
-- **Physical verification is the developer's, not yet performed** — section
-  13 of the Phase 12 prompt: hold a real watch to both cameras and see how
-  often it is actually recognised (this project's first physical test of
-  any custom-trained recognition), confirm Diagnostics shows the active
-  model, confirm baseline classes and tracking/pose are unchanged.
-- **The Phase 8 latency floor was not cleanly reconfirmed** — this
-  sandboxed VM's own session load drifted enough (detector-only inference,
-  unchanged by this phase, varied 37–228ms p50 across back-to-back runs) to
-  make the attempted A/B comparison inconclusive; a quiet-machine re-run is
-  left to the developer.
-- **Only `watch` is trained** — the other ten mapped classes (glasses,
-  headphones, mug/cup, bottle, bowl, can, keyboard, phone, pen) are audited
-  and mapped only, per section 10.6's explicit "one class only" scope.
-- **`comb` remains Studio-data-only and untrainable** — 2 samples, 0
-  external data, confirmed unavailable from Open Images V7 entirely.
-- Every Phase 9/10 threshold is still derived from one clip/session each —
-  unchanged this phase, re-derive once more footage exists.
+**Next: Stage 6, the temporal layer on the baseline detector over recorded
+video — BLOCKED on the developer's TC video recordings (`data/videos/` is
+empty).** See `docs/PROJECT-STATE.md` for the full roadmap and current
+position; that file, not this section, is the single source of "where we
+actually are" going forward.
 
 Do not start risk prediction without the user's explicit go-ahead.
 
