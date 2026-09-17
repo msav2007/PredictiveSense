@@ -44,8 +44,9 @@
       "machine_fingerprint": "Windows-10-10.0.26200-SP0 | Intel64 Family 6 Model 170 Stepping 4, GenuineIntel | 18 logical cores | Python 3.11.9",
       "provider": "cpu (training always runs in PyTorch on CPU; serving is ONNX Runtime, see perception/classifier.py)",
       "dataset_human_confirmed_fraction": 1.0,
-      "validated": true,
-      "active": true,
+      "validated": false,
+      "active": false,
+      "superseded_reason": "Single-class softmax is degenerate: with only one trained class, softmax over one logit is mathematically forced to ~1.0 for any input, which is exactly what this entry's own false_class_rate: 1.0 measures - it is not a usable classifier, regardless of the feature flag state.",
       "notes": "trained from C:\\Users\\mummi\\AppData\\Local\\Temp\\claude\\C--Users-mummi-Documents-Projects-PredictiveSense\\072a49c1-ed7f-4273-b51b-eec7161fdae0\\scratchpad\\empty_objects_root + external: ['data/external/open-images-v7/watch/manifest.json']"
     }
   ]
