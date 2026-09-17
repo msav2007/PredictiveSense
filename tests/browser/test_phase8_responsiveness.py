@@ -67,9 +67,11 @@ def test_slash_and_studio_load_with_zero_console_errors(live_server: str, browse
         ctx.close()
 
 
-def test_overlay_de_emphasises_a_stale_pose(live_server: str, page: Page, console) -> None:
-    """Feed the overlay a synthetic snapshot with pose_stale=true and confirm the
-    draw path takes the stale branch (dashed line, dimmer alpha) without error."""
+def test_overlay_de_emphasises_an_aged_pose(live_server: str, page: Page, console) -> None:
+    """Phase 10 section 5: pose is bound to the person TRACK, not drawn off a
+    frame-level `poses` list. Feed the overlay a synthetic snapshot with a
+    track carrying an aged (near pose_max_age_ms) bound pose and confirm the
+    draw path takes the aged branch (dashed line, dimmer alpha) without error."""
 
     page.goto(f"{live_server}/", wait_until="networkidle")
     page.wait_for_timeout(800)
@@ -88,21 +90,33 @@ def test_overlay_de_emphasises_a_stale_pose(live_server: str, page: Page, consol
           const gaDesc = Object.getOwnPropertyDescriptor(proto, 'globalAlpha');
 
           const kp = Array.from({ length: 17 }, () => [50, 50, 0.9]);
+          const maxAge = mod.runtime.config?.tracking?.pose_max_age_ms ?? 900;
+          const track = {
+            track_id: 1, status: 'confirmed', class_name: 'person', bbox: [10, 10, 90, 90],
+            last_seen_frame_id: 5, observed_class: 'person', track_class: 'person',
+            class_votes: [['person', 1]], velocity: [0, 0], fresh: true, age_frames: 1,
+            age_ms: 100, hits: 1, consecutive_misses: 0, first_seen_frame_id: 0,
+            last_detection_frame_id: 5, last_detection_capture_ts: 1,
+            last_detector_confidence: 0.9, last_detector_confidence_age_ms: 0,
+            policy_state: 'accepted', tier: 'primary',
+            pose_keypoints: kp, pose_frame_id: 4, pose_capture_ts: 1,
+            pose_age_ms: maxAge * 0.9, pose_fresh: false,
+          };
           const snap = {
             snapshot_id: 999, mode: 'realtime', frame_id: 5, capture_ts: 1, emitted_ts: 1,
-            frame_age_ms: 40, detections: [], poses: [{ keypoints: kp, bbox: [10,10,90,90], score: 0.9, frame_id: 4 }],
-            tracks: [], risk: null, metrics: { capture_client_ts_ms: performance.timeOrigin + performance.now() },
-            stale: false, pose_stale: true,
+            frame_age_ms: 40, detections: [], poses: [],
+            tracks: [track], risk: null, metrics: { capture_client_ts_ms: performance.timeOrigin + performance.now() },
+            stale: false, pose_stale: false,
           };
           mod.runtime.lastSnapshot = snap;
           store.setSnapshot(snap);
           await new Promise(r => setTimeout(r, 200));
           proto.setLineDash = origDash;
-          // a stale skeleton must have been drawn with a dash pattern at least once
+          // a heavily-aged skeleton must have been drawn with a dash pattern at least once
           const dashed = calls.setLineDash.some(p => p.length === 2 && p[0] > 0);
           return { dashed, dashCalls: calls.setLineDash.length };
         }"""
     )
     assert result["dashCalls"] > 0, "overlay.draw() never ran for the injected snapshot"
-    assert result["dashed"], "stale pose was not drawn with a dashed (de-emphasised) skeleton"
+    assert result["dashed"], "aged pose was not drawn with a dashed (de-emphasised) skeleton"
     console.assert_clean()

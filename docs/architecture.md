@@ -1032,3 +1032,322 @@ no synchronous inference on the main thread; preview is never reconnected to
 analysis completion. Re-verified by `tests/integration/test_preview_independence.py`
 and `tests/browser/test_phase8_responsiveness.py` (preview FPS recorded during a
 deliberate 3 s `POST /api/debug/stall`).
+
+---
+
+# Phase 9 - multi-object tracking & honest detection state semantics
+
+Two problems, one phase: (A) identity was not continuous - every displayed
+object was a fresh per-frame detection, so a missed detection made it vanish
+and reappear as something new; (B) "grey" meant at least four unrelated
+things on the overlay, so the visual state was not honestly readable. Full
+root-cause trace, the measured frequency table, and every threshold's
+derivation: `docs/phase-reports/phase9.md`. No custom-model training, no risk
+prediction, no relationship engine, no voice.
+
+## Root cause of the grey-state symptoms (traced, not guessed)
+
+Confirmed by reading `perception/policy.py` -> `core/types.py` ->
+`pipeline/loop.py` -> `api/broadcast.py` -> `static/features/metrics.js` ->
+`static/ui/store.js` -> `static/features/overlay.js`, then measured on the
+developer's own footage (`results/grey_state_frequency.md`):
+
+1. **`accepted_secondary`** (secondary-tier de-emphasis) rendered a fixed
+   grey-blue at fixed alpha, independent of score - dominant on the measured
+   clip (38.4% of all detections).
+2. **`low_confidence_band`** (`perception.detector.low_confidence_band`) and
+   the policy's own **`per_class_threshold_rule`** are two independently
+   configured cutoffs that can drift apart - a detection could be
+   `policy_state=="accepted"` yet still render dashed/dimmed by the band, a
+   second, uncoordinated "looks uncertain" signal (32.7% of detections were
+   band members).
+3. **`unknown_low_confidence` / `unknown_margin`** render the label text
+   `"Unknown"` with **no confidence percentage** at all (`overlay.js`'s only
+   branch that appended a `%` was `accepted`) - by design for the "Unknown"
+   case, but the same omission accidentally applied to every other
+   de-emphasised state too, including `accepted_secondary`.
+4. **Snapshot staleness**: `stale=True` at the pipeline level implied an
+   *empty* `detections` list (not a dimmed previous frame), and the browser
+   client unconditionally overwrote `runtime.lastSnapshot` on every message -
+   so any ingest gap over `stale_after_ms` made every box vanish, then
+   reappear.
+5. **Zero hysteresis anywhere.** `RecognitionPolicy` is stateless per frame
+   and the overlay redrew directly off the raw per-frame `policy_state`/
+   `score` on every WS message - a detector score oscillating near a
+   threshold flipped accepted <-> unknown, and thus green <-> grey, with no
+   damping.
+
+Four independently-caused greys, one of them (band) not even part of the
+documented design, converging on the same dashed/dimmed visual treatment -
+this is what "grey means something different every time" meant in practice,
+not user misperception.
+
+## `predictivesense/tracking/` - the tracker
+
+Pure, dependency-free (stdlib + numpy only - no tracking library added; see
+`docs/attribution.md` for the algorithm family cited). Consumes one frame's
+already policy-annotated `Detection` list and produces `Track` objects; no
+inference, no I/O, no global state. One instance per analysis run (real-time
+loop or recorded driver), held by the caller exactly like `RecognitionPolicy`.
+
+```
+PerceptionFrame.detections (policy-annotated)
+        │
+        ▼  TRACK_ELIGIBLE_STATES filter (excludes rejected_size, suppressed_implausible -
+        │  the policy's own judgement that these are not candidate objects)
+        ▼
+Tracker.update(detections, frame_id, capture_ts, frame_width, frame_height)
+   ├─ predict: constant-velocity extrapolation of every live track's bbox
+   ├─ stage 1: greedy association, high-score detections x all live tracks
+   │           (5 weighted signals: IoU, centre distance, size ratio,
+   │            motion consistency, class agreement - class is a signal,
+   │            never a gate)
+   ├─ stage 2: greedy IoU-only association, low-score detections x
+   │           confirmed/coasting tracks only (never spawns a new track -
+   │           a low-confidence single detection must not bypass n_init)
+   ├─ lifecycle: tentative -> confirmed (n_init consecutive hits) ->
+   │             coasting (miss, predicted position) -> expired
+   │             (max_age frames AND max_age_ms, whichever is tighter;
+   │             a track leaving the frame border gets a much smaller budget)
+   └─ re-association: an unmatched detection may reclaim a recently-expired
+      (non-border) track's id on a strong geometric match; a weak match
+      spawns a new id - "an incorrectly reused id is worse than a new one"
+        │
+        ▼
+list[Track]  ──▶  StateSnapshot.tracks (real-time) / recorded JSONL `tracks` (Mode B)
+```
+
+| module | responsibility |
+|---|---|
+| `geometry.py` | Pure bbox math: `iou`, `center`, `area`, `diagonal`, `center_distance_score`, `size_ratio_score`, `shift` (motion prediction), `is_off_frame` (border check). |
+| `association.py` | `score_pair` - the 5-signal weighted cost function, gated (a pair with zero IoU and centres more than half a diagonal apart is ineligible regardless of class agreement); `greedy_match` - highest-score-first assignment, no Hungarian solve, no `scipy`/`lap` dependency. |
+| `track_state.py` | `TrackState` - mutable per-track bookkeeping between `update()` calls (bounded `deque` class-vote history, majority-vote resolution with most-recent tie-break) and its conversion to the immutable `Track` contract. |
+| `tracker.py` | `Tracker` - orchestrates predict / two-stage association / lifecycle / re-association; `TrackerStats` - cumulative counters (`created`, `confirmed`, `expired`, `expired_border`, `reassociated`, `dropped_max_tracks`), the tracking-layer analogue of `PolicyCounts`. |
+
+## `Track` contract (additive fields on the Phase 0 minimal shape)
+
+`core/types.Track` gained, additively (`track_id`, `status`, `class_name`,
+`bbox`, `last_seen_frame_id` are unchanged from Phase 0):
+
+| field | meaning |
+|---|---|
+| `observed_class` | what the detector said on the most recent **fresh** observation (unchanged while coasting) |
+| `track_class` | the bounded-history majority vote; may differ from `observed_class` when the raw class flips frame to frame (e.g. `cup` <-> `phone`) |
+| `class_votes` | `(class_name, count)` pairs backing `track_class`, most-voted first |
+| `velocity` | constant-velocity estimate, px/second, of the bbox centre |
+| `fresh` | a detector observation landed exactly on this frame (`True`) vs the bbox is this cycle's motion prediction (`False`, coasting) |
+| `hits` / `consecutive_misses` / `age_frames` / `age_ms` | lifecycle counters |
+| `last_detector_confidence` / `last_detector_confidence_age_ms` | the score of the observation that produced it, and that observation's age - **never** recomputed, decayed or invented while coasting; `None` confidence means no observation has ever fired |
+| `policy_state` / `tier` | of that same last fresh observation |
+
+Association features (bbox, velocity, age, pose keypoints already on
+`PerceptionFrame`) are exposed for a future person<->object relationship
+layer without implementing one - no relationship field is added, no holding
+classifier exists (section 12 of the Phase 9 prompt).
+
+## Track lifecycle
+
+```
+tentative --(n_init consecutive hits)--> confirmed
+confirmed --(a miss)--> coasting --(a hit)--> confirmed
+coasting  --(consecutive_misses exceeds max_age, in frames or ms)--> expired
+tentative --(any miss)--> expired            (no coasting - see below)
+confirmed/coasting --(predicted centre leaves the frame)--> border-flagged,
+                        expires after border_exit_max_age_frames (default 1)
+```
+
+A miss during `tentative` deletes the track rather than coasting it: a
+partial hit streak interrupted by a miss must not later resume and reach
+`n_init` as if it had never been interrupted (`docs/decisions.md`). A track
+that expires **without** exiting the border enters a bounded, short-lived
+"ghost" pool (`reassoc_window_frames`); a subsequent detection that matches a
+ghost's extrapolated position and size strongly enough reclaims that ghost's
+id and full history; a border-exit expiry never enters the pool (it is
+expected to be gone, not occluded).
+
+`n_init`, `max_age_frames` and `max_age_ms` are **measured**, not invented -
+`scripts/track_threshold_derivation.py` runs a live real-time session over
+the developer's own footage and derives them from the observed presence/
+miss-run-length distribution at the actual analysis cadence (see
+`docs/decisions.md` for the exact numbers and the rule applied). Every other
+tracker parameter (`max_tracks`, `class_vote_history`,
+`reassoc_window_frames`, association weights) is a documented, bounded-
+resource or judgement default, individually commented in `TrackingConfig`
+(`config/settings.py`) and cheap to revise once more footage exists.
+
+## Confidence semantics - no invented numbers
+
+Detector confidence and track association are different quantities and are
+never merged: an association score is not a probability that the object is a
+cup. A track carries `last_detector_confidence` together with the age of the
+observation that produced it; while coasting, that value is **carried
+forward unchanged**, never recomputed or decayed into a fake probability. A
+track with no fresh detection and no prior confidence shows no percentage at
+all - not a zero, not a placeholder.
+
+## State -> visual mapping (one channel per concept)
+
+`static/features/overlay.js` now draws `snap.tracks` (not `snap.detections`
+directly - every track-eligible detection this frame is already represented
+by some track, new or continuing). Five independent visual channels, so no
+two states render identically:
+
+| concept | channel | where |
+|---|---|---|
+| Track identity | Hue, `identityColor(track_id)` - deterministic, stable for the track's life, independent of class or state | box stroke + label background |
+| Fresh detection vs coasting | Stroke style - solid (`fresh: true`) vs dashed `[6,4]` (a motion prediction) | box stroke only - no longer doubles as a confidence-band or uncertainty signal |
+| Recognition uncertainty (`unknown_*`) | Label text reads exactly `"Unknown"` - no colour change, no percentage | label text only |
+| Vocabulary tier (`accepted_secondary`) | A small `"tier: secondary"` badge above the label | a separate small fill, never the box colour |
+| Snapshot staleness | Whole-overlay dim (`ctx.globalAlpha = 0.32`) + a `"STALE"` banner - a property of the frame, not any one object | applies to everything painted that frame |
+
+`suppressed_implausible` detections are **never tracked** (excluded by
+`TRACK_ELIGIBLE_STATES` - the policy's own judgement that they are not
+candidate objects); the Diagnostics-only "reveal suppressed" toggle still
+draws them, straight from `snap.detections`, with the old flat grey/dotted
+style and no identity or freshness concept (there is none for something
+never tracked). The `low_confidence_band`'s former dashed/dimmed treatment of
+`accepted` detections is retired as a distinct visual signal (root-cause
+finding 2) - the actual confidence value stays visible via the label
+percentage and the confidence bar.
+
+**Flicker suppression** (`overlay.js`, presentation-only): a track's
+displayed *kind* (accepted/secondary/unknown) only changes once the new kind
+has persisted for `KIND_DWELL_MS` (150 ms, ~3 analysis cycles at the measured
+p50 interval) - a single-cycle `policy_state` flicker no longer blinks the
+label. Diagnostics still reads the raw, unsmoothed per-frame `policy_state`/
+`tier`/`score` (`snap.detections`, untouched) and now also a per-track detail
+view (`groups/diagnostics.js`: `track_id`, `status`, observed vs track class,
+vote counts, last detector confidence + age, consecutive misses, track age,
+`policy_state`, `tier` - click a box on the overlay to select a track; the
+active model/provider are already shown in the adjacent Perception block).
+
+## Stage attribution
+
+`tracker` joins the existing Phase 8 stage-attribution chain
+(`telemetry/stages.py`: `FrameTrace.tracker_ms`, `SERVER_STAGE_NAMES`,
+folded into `MetricRegistry` as `stage_tracker_ms`) between `policy` and
+`snapshot_build`. Measured p50 0.19 ms / p95 0.3 ms on the developer's
+footage - a fraction of a millisecond against the ~110 ms end-to-end budget;
+`docs/phase-reports/phase9.md` has the full before/after.
+
+## Real-time and recorded consistency
+
+One `Tracker` class serves both modes (`pipeline/loop.py`,
+`pipeline/recorded.py`) - never forked. The tracker reads no clock itself;
+`capture_ts` is passed in from the caller (`Frame.capture_ts`), so recorded
+mode's file-PTS-derived timestamps keep the whole run deterministic: the same
+clip + config + model + tracker produce byte-identical `tracks` across two
+runs (`tests/integration/test_recorded_determinism_with_models.py`). The
+tracker only ever sees a frame that actually arrived this cycle - the
+Phase 8 staleness guard and newest-frame semantics stand unchanged; on a
+stale/guard-dropped cycle the tracker performs no update at all (its
+internal state has not changed), and the last real track list is reported
+unchanged rather than wiped to empty - this is also what fixes root-cause
+finding 4 in practice: the whole overlay now stays visible, dimmed, through
+a brief stale gap instead of every box vanishing. Real-time is lossy by
+design (frames are dropped under load); recorded is lossless (every decoded
+frame reaches the tracker) - track-continuity metrics are therefore
+**not comparable** between the two modes.
+
+## Still absent after Phase 9
+
+No relationship/holding classifier, no `Relation` field populated, no risk
+model, no temporal risk classifier, no preventive recommendations, no voice/
+TTS, no Scene Snapshot Studio. No custom object training or fine-tuning - the
+tracker stabilises identity and presentation, it does not make the detector
+recognise anything it could not before (watch, spectacles, charger,
+headphones, shaker remain unrecognised). No appearance-based re-identification
+(association is geometry + motion + class-vote only). No tracking dependency
+was added. `MOTA`/`IDF1` or any metric requiring labelled ground truth is not
+computed - that footage does not exist; only scripted-sequence ID-switch and
+fragmentation counts are (`tests/unit/test_tracking.py`).
+
+---
+
+# Phase 10 - perception regression repair + track & pose continuity
+
+## The central diagnostic
+
+`scripts/pipeline_attrition.py` runs one clip through the real detector ->
+policy -> tracker classes (identical code to the live loop / recorded driver)
+and tabulates, per required class, how many raw detections existed and how
+many survived each layer (raw -> policy state -> tracker input -> tracker
+output -> rendered). Published **before any fix**, per section 3 - see
+`results/pipeline_attrition_<label>.md` and the Phase 10 decisions log entry
+for the headline findings. The render predicate finding it produced: the
+overlay draws every track in `snap.tracks` regardless of `status` (no
+confirmed-only gate), so "tracker output" and "rendered" are identical by
+construction - kept as-is, deliberately (a real detection is never invisible
+purely because its track is unconfirmed).
+
+## Pose bound to the person track (section 5)
+
+Root-caused by `scripts/pose_continuity_audit.py` (a live real-time session,
+mirroring `grey_state_audit.py`'s methodology): the pre-Phase-10 pipeline drew
+pose straight off `StateSnapshot.poses` every frame, and the perception
+engine's own cadence/reuse bookkeeping (`PerceptionEngine._last_poses`) has no
+memory beyond one reuse window - a cadence-due inference that scores below
+`pose.conf` returns `[]`, which overwrites `_last_poses` to empty, so the
+skeleton vanishes until the next successful cadence cycle. Measured: 36.4% of
+non-stale live snapshots carried zero pose (`results/pose_continuity_raw.md`).
+
+Phase 10 binds pose to the tracker instead:
+
+```
+PerceptionEngine.infer(frame) -> poses (fresh, reused, or empty this cycle)
+                                        |
+        Tracker.update(detections, ..., poses=poses, pose_fresh=...)
+                                        |
+              (after hit/miss/spawn)   v
+                  Tracker._bind_poses(poses, capture_ts, fresh)
+                    - person-class tracks only (majority_class == "person")
+                    - each pose -> highest-IoU person track's box,
+                      at/above tracking.pose_bind_min_iou
+                    - a tie between the top two candidates -> no assignment
+                                        |
+                       TrackState.record_pose(...) (mutable, persists
+                       across a cycle with poses=() - NOT wiped)
+                                        |
+                TrackState.to_track(..., pose_max_age_ms) -> Track
+                    - age computed continuously each cycle
+                    - dropped entirely once age > tracking.pose_max_age_ms
+```
+
+`Track` gains five additive fields: `pose_keypoints` (`()` when nothing is
+bound or it has aged out), `pose_frame_id`, `pose_capture_ts`, `pose_age_ms`
+(**continuous** milliseconds - mirrors `last_detector_confidence_age_ms`,
+deliberately not a second binary stale flag so the overlay can fade emphasis
+smoothly rather than blink between two fixed looks), `pose_fresh` (true only
+on the exact cycle a brand-new, non-engine-reused pose was bound to this
+track). `Tracker.update()` gained optional `poses=()` / `pose_fresh=True`
+kwargs - every pre-Phase-10 call site is unaffected.
+
+`overlay.js` draws each track's own bound pose (inside `drawTrack`'s loop,
+independent of the detection-box layer toggle - matching the pre-Phase-10
+independence of the pose/detection toggles) instead of iterating
+`snap.poses`; `drawPose` takes a continuous `ageFrac` in `[0,1]` (`pose_age_ms
+/ pose_max_age_ms`) instead of a boolean `stale`, fading stroke/fill alpha and
+switching to a dashed edge as the fraction rises, never disappearing and
+reappearing on an engine-level empty cycle the way the old per-frame draw did.
+A person with no open track this frame still shows no pose (never a floating,
+unbound skeleton) - the same "no assignment rather than a guess" principle as
+the binding rule itself, just at the zero-tracks edge case.
+
+`pose_max_age_ms` (900 ms, `TrackingConfig`) is derived from
+`results/pose_continuity_raw.md`'s measured worst-case empty-gap run
+(~580 ms) with margin - the same "measured, re-derive once more footage
+exists" status as `n_init`/`max_age_frames`/`max_age_ms`. `pose_bind_min_iou`
+(0.1) is a judgement default (documented in `docs/decisions.md`), not
+measured.
+
+## Still absent after Phase 10
+
+No custom model training or fine-tuning - `bed -> chair` and the clip's
+`umbrella` misclassification are model errors this phase measured and
+recorded but did not attempt to fix. No relationship/holding classifier, no
+risk model, no temporal risk classifier, no preventive recommendations, no
+voice/TTS, no Scene Snapshot Studio. `results/pipeline_attrition_*.md` and
+`results/pose_continuity_*.md` are each one clip / one session - re-derive
+once more footage (including an OnePlus Nord 4 clip - none exists in
+`data/raw` yet) is available. Physical camera verification (section 15) is
+the developer's, not yet performed.

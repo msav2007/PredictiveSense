@@ -15,6 +15,7 @@ import pytest
 from predictivesense.perception.engine import build_perception
 from predictivesense.perception.policy import RecognitionPolicy
 from predictivesense.pipeline.recorded import RecordedDriver
+from predictivesense.tracking import Tracker
 
 pytestmark = [pytest.mark.integration, pytest.mark.models]
 
@@ -39,6 +40,55 @@ def test_two_runs_with_policy_are_byte_identical(engine, perception_dev_config, 
     body = Path(r1["jsonl_path"]).read_text(encoding="utf-8")
     if '"detections":[{' in body.replace(" ", ""):
         assert "policy_state" in body
+
+
+def test_two_runs_with_tracker_are_byte_identical(
+    engine, perception_dev_config, fixture_video, tmp_path
+) -> None:
+    """Phase 9 section 13.2: one tracker implementation, fed the file's own PTS
+    (never wall time) - two runs of the same clip/config/model/tracker produce
+    identical track ids and states, byte for byte."""
+
+    policy = RecognitionPolicy(perception_dev_config.policy)
+    r1 = RecordedDriver(results_dir=tmp_path / "a").run(
+        fixture_video, replay_mode="asfast", run_id="t",
+        perception=engine, policy=policy, tracker=Tracker(perception_dev_config.tracking),
+    )
+    r2 = RecordedDriver(results_dir=tmp_path / "b").run(
+        fixture_video, replay_mode="asfast", run_id="t",
+        perception=engine, policy=policy, tracker=Tracker(perception_dev_config.tracking),
+    )
+    assert Path(r1["jsonl_path"]).read_bytes() == Path(r2["jsonl_path"]).read_bytes()
+
+
+def test_tracks_are_shaped_and_bounded(
+    engine, perception_dev_config, fixture_video, tmp_path
+) -> None:
+    policy = RecognitionPolicy(perception_dev_config.policy)
+    result = RecordedDriver(results_dir=tmp_path).run(
+        fixture_video, replay_mode="asfast", run_id="t",
+        perception=engine, policy=policy, tracker=Tracker(perception_dev_config.tracking),
+    )
+    lines = Path(result["jsonl_path"]).read_text(encoding="utf-8").splitlines()
+    expected_keys = {
+        "track_id", "status", "class_name", "bbox", "observed_class", "track_class",
+        "class_votes", "velocity", "fresh", "age_frames", "age_ms", "hits",
+        "consecutive_misses", "last_detector_confidence",
+        "last_detector_confidence_age_ms", "policy_state", "tier",
+        # Phase 10 section 5: pose bound to the track, additive.
+        "pose_keypoints", "pose_frame_id", "pose_age_ms", "pose_fresh",
+    }
+    for line in lines:
+        row = json.loads(line)
+        for tr in row["tracks"]:
+            assert set(tr) == expected_keys
+            assert tr["status"] in ("tentative", "confirmed", "coasting")
+            assert len(tr["bbox"]) == 4
+            conf = tr["last_detector_confidence"]
+            assert conf is None or 0.0 <= conf <= 1.0
+            assert tr["pose_age_ms"] >= 0.0
+            for kp in tr["pose_keypoints"]:
+                assert len(kp) == 3
 
 
 def test_two_runs_with_models_are_byte_identical(engine, fixture_video, tmp_path) -> None:

@@ -976,3 +976,121 @@ Full trace, measurements and physical-verification status:
   alongside, not replacing, the existing per-detection "Recognition detail"
   panel.
 
+## Phase 10 - perception regression repair + track & pose continuity
+
+- **2026-09-15** `scripts/pipeline_attrition.py` built and its output
+  (`results/pipeline_attrition_integrated_camera.{json,md}`) published
+  **before any fix**, per required class, on the only clip in `data/raw`
+  (laptop integrated camera - no OnePlus clip exists yet, so that comparison
+  is deferred to the developer, section 10/15). Findings: `bottle`, `laptop`,
+  `keyboard`, `mouse`, `chair`, `book`, `backpack` had **zero raw detections**
+  across 501 frames on this clip (a footage-content / model-capability
+  question, not a pipeline bug - nothing to attribute attrition to for these
+  classes on this footage). `cell phone` showed real tracker-layer attrition
+  (22 raw -> 14 rendered): a low-score detection (`score <
+  tracking.high_score_split`) with no already-open, non-tentative track to
+  extend is dropped before ever becoming a track - it can neither spawn one
+  nor match a still-tentative one (`Tracker._match_and_apply_hits`). The
+  entire `accepted_secondary` bucket (350/350 detections) on this clip is one
+  systematic misclassification of something in the room as `umbrella` -
+  flagged, not fixed (a model error, out of scope per section 3.1's `bed ->
+  chair` precedent).
+- **2026-09-15** Section 3.1's "the overlay may now render only confirmed
+  tracks" hypothesis is **REFUTED** by reading the shipped `overlay.js`
+  (`draw()`/`drawTrack()`, pre-Phase-10): every entry of `snap.tracks` is
+  drawn regardless of `status` - there is no confirmed-only gate, and the
+  attrition table's `tracker output` and `rendered` columns are identical by
+  construction, including nonzero tentative-status entries. Render predicate
+  (section 6.1) is therefore **kept as-is, deliberately**: a real detection
+  that spawns a track (any status) is never invisible purely because the
+  track is unconfirmed. The actual "invisible despite being detected"
+  mechanism is the tracker-input attrition finding above, one layer earlier.
+- **2026-09-15** Green-line (pose skeleton) restart root-caused by
+  `scripts/pose_continuity_audit.py` (real live `/ws/ingest`->`/ws/state`
+  session, `results/pose_continuity_raw.md`): **36.4%** of non-stale live
+  snapshots carried **zero** pose (not dimmed - genuinely absent), across 159
+  distinct gap runs (max 9 consecutive snapshots, ~580ms at the measured
+  interval). Hypothesis 1 (`pose_cadence`/`pose_max_reuse_ms` mismatch) is
+  **not** the primary cause (measured fresh-pose refresh interval p95 406ms,
+  under the 500ms reuse budget). The actual mechanism: `PerceptionEngine.infer`
+  (`predictivesense/perception/engine.py`) overwrites `_last_poses` to an
+  **empty** tuple whenever a cadence-due pose inference returns `[]` (person
+  score momentarily under `pose.conf`=0.4) - the reuse branch's own guard
+  (`elif ... and self._last_poses ...`) then finds nothing to reuse on every
+  subsequent frame until the next successful due-cycle. Pose has no identity
+  of its own in the pre-Phase-10 pipeline (drawn straight off the per-frame
+  `StateSnapshot.poses`), so this empty-result gap is directly visible as the
+  reported ~1s restart.
+- **2026-09-15** Fix (section 5): pose is now **bound to the person track**
+  it best overlaps (`Tracker._bind_poses`, highest IoU between the pose's own
+  box and a person-class track's box, at or above the new
+  `tracking.pose_bind_min_iou` (0.1, judgement default - low enough to
+  tolerate the pose and detector boxes disagreeing slightly, high enough to
+  reject a pose that plainly belongs to someone else); a tie between the top
+  two candidate tracks assigns nothing (section 5.3, never a guess). The
+  binding is stored on the mutable `TrackState` (`pose_keypoints`,
+  `pose_source_frame_id`, `pose_capture_ts`, `pose_is_fresh_binding`) so a
+  cycle where the ENGINE produces no pose at all (the measured 36.4% case)
+  leaves the existing binding untouched - it ages instead of vanishing,
+  bounded by the new `tracking.pose_max_age_ms` (900ms - derived from
+  `results/pose_continuity_raw.md`'s measured max empty-gap-run length,
+  ~580ms, with margin; same "re-derive once more footage exists" caveat as
+  `n_init`/`max_age`). `Track` gains five additive fields (Phase 0 rule):
+  `pose_keypoints`, `pose_frame_id`, `pose_capture_ts`, `pose_age_ms` (a
+  **continuous** ms value, mirroring `last_detector_confidence_age_ms` -
+  deliberately not a second binary stale flag, per section 5.2's "visibly
+  reduced emphasis as it ages" and section 5.4's "do not interpolate,
+  persisting the last pose with an age is honest"), `pose_fresh` (true only
+  on the exact cycle a brand-new, non-engine-reused pose was bound).
+  `Tracker.update()` gained optional `poses=()`/`pose_fresh=True` kwargs
+  (backward compatible - every pre-Phase-10 call site is unaffected).
+  `overlay.js` now draws each track's own bound pose (`drawPose` takes a
+  continuous `ageFrac` in [0,1] instead of a boolean `stale`, fading emphasis
+  smoothly toward `pose_max_age_ms`) instead of looping `snap.poses`
+  per-frame; the pose layer toggle stays independent of the detection-box
+  layer toggle, matching pre-Phase-10 behaviour. `pipeline/recorded.py`'s
+  `_track_to_dict` gained the four wire-relevant pose fields (additive, JSONL
+  determinism preserved and re-asserted by
+  `test_tracks_are_shaped_and_bounded`). A person with no open track this
+  frame still has no pose shown (never a floating unbound skeleton) - the
+  same "no assignment rather than a guess" principle as section 5.3, just at
+  the edge case of zero person tracks.
+- **2026-09-15** Latency floor re-measured after the pose-binding change, one
+  session, both conditions on this machine to control for its current load
+  (elevated vs the Phase 8/9 baseline articles - `process_cpu_percent` ~920-960%
+  in both runs, i.e. this run was measured under heavier background load than
+  Phase 8/9's baseline sessions, not caused by this change):
+  tracking+pose-binding on, capture->snapshot p50 159.22ms; tracking off
+  (control, same session), p50 165.43ms - tracking+pose-binding is not slower
+  than the no-tracking control measured in the same noisy conditions.
+  `tracker_update_ms` (which now includes `_bind_poses`) stayed at p50
+  0.21ms / p95 0.4ms, statistically unchanged from Phase 9's 0.19ms/0.3ms -
+  the pose-binding addition itself adds no measurable cost. The elevated
+  absolute p50 vs Phase 9's report (112.63ms) reflects this machine's current
+  background load, not a regression from this change; a floor-clean
+  re-measurement is recommended before the phase report is treated as final.
+- **2026-09-15** `scripts/input_size_recall_compare.py` re-compared detector
+  `input_size` 640 vs 480 on the same clip, by per-class raw-detection recall
+  (`results/input_size_recall_integrated_camera.md`) - the missing evidence
+  the Phase 8 sweep's identical 197/197/197 totals could not provide (that
+  clip had nothing small enough to discriminate). Result, 501 frames: `person`
+  504@480 vs 505@640 (a wash); **`cell phone` 22@480 vs 32@640 - a real,
+  material recall loss at 480 (-31% vs 640) on this footage**; `cup` 35@480 vs
+  17@640 (480 detected MORE here - the opposite direction, unexplained,
+  possibly NMS/anchor-density interaction at the smaller input, not
+  investigated further this phase); `bottle`/`laptop`/`keyboard`/`mouse`/
+  `chair`/`book`/`backpack` at zero for both sizes (absent from this footage
+  or beyond model capability regardless of resolution - this clip cannot
+  distinguish the two). **Decision: `input_size` stays 480, unchanged**, given
+  (a) the Phase 8 latency saving is real and load-bearing (~46ms vs ~73ms
+  detector p50) and section 19 requires preserving it, (b) the evidence is
+  single-clip and directionally mixed (phone favours 640, cup favours 480),
+  and (c) `docs/decisions.md`'s existing "still needs a clip with small-in-
+  frame objects" caveat is not fully resolved by one session - this
+  measurement is data toward that resolution, not a substitute for it.
+  `input_size: 480` remains explicitly **provisional**, now with a concrete,
+  non-trivial counter-example (phone) on record rather than an untested
+  assumption. Re-run this script once more/different footage exists,
+  especially footage with a phone or watch at typical desk distance, before
+  treating 480 as settled.
+
