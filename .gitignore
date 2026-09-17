@@ -28,6 +28,18 @@ results/*
 # record of when `test` was opened and the alternative-model licence evidence).
 !results/test_set_openings.md
 !results/model_comparison.md
+# Phase 12 external-dataset audit + class mapping - reviewable decisions,
+# not derived metrics (a pre-existing gap: results/* silently excluded these
+# from every commit until Stage 5 caught it - see docs/decisions.md).
+!results/external_dataset_audit.json
+!results/external_dataset_audit.md
+!results/external_class_mapping.json
+# Stage 5 detection-dataset class map + duplicate/blur/geometry/licence audit
+# - reviewable decisions and measurements, committed like their Phase 12
+# counterparts above, not derived-and-regenerable metrics.
+!results/detection_class_map.json
+!results/detection_dataset_audit.json
+!results/detection_dataset_audit.md
 
 # Generated test fixtures (regenerated on demand by tests/fixtures/make_fixture_video.py)
 tests/fixtures/*.avi
